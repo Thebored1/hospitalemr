@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/patient_referral.dart';
 import '../services/api_service.dart';
-import '../widgets/tap_to_call_text.dart'; // Added import
+import '../widgets/tap_to_call_text.dart';
+import '../widgets/network_indicator.dart';
 
 class AllPatientsScreen extends StatefulWidget {
   const AllPatientsScreen({super.key});
@@ -42,6 +43,14 @@ class _AllPatientsScreenState extends State<AllPatientsScreen> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black,
         elevation: 0,
+        actions: const [
+          Center(
+            child: Padding(
+              padding: EdgeInsets.only(right: 16.0),
+              child: NetworkIndicator(),
+            ),
+          ),
+        ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())

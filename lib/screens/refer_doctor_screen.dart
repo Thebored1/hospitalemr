@@ -6,7 +6,7 @@ import 'dart:io';
 import '../models/doctor.dart';
 import '../services/api_service.dart';
 import '../services/camera_service.dart';
-import '../widgets/tap_to_call_text.dart'; // Added import
+import '../widgets/network_indicator.dart';
 
 class DoctorReferralForm extends StatefulWidget {
   final int tripId;
@@ -51,27 +51,21 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
   void initState() {
     super.initState();
     if (widget.existingDoctor != null) {
-      _populateFields(widget.existingDoctor!);
+      if (widget.existingDoctor!.tripId == widget.tripId) {
+        // Editing an existing visit in this trip (e.g. continuing a partial draft)
+        _populateFields(widget.existingDoctor!);
+      } else {
+        // Starting a new visit for a pending/assigned doctor from a previous trip
+        _populateFields(widget.existingDoctor!);
+        _remarksController.clear();
+        _detailsController.clear();
+      }
       _selectedDoctor = widget.existingDoctor;
     }
     _loadAllDoctors();
     _loadSpecializations();
     _loadQualifications();
-    _loadQualifications();
     _checkLocationPermission();
-    _checkLostImage();
-  }
-
-  Future<void> _checkLostImage() async {
-    final lostImage = await CameraService.checkForLostImage();
-    if (lostImage != null && mounted) {
-      setState(() {
-        _visitImage = lostImage;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Restored photo from previous session')),
-      );
-    }
   }
 
   Future<void> _checkLocationPermission() async {
@@ -126,6 +120,18 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     setState(() {
       _allDoctors = doctors;
       _isLoadingDoctors = false;
+
+      // Fix reference mismatch: if we have a pre-selected doctor, find its matching instance
+      // in the newly loaded list so the dropdown doesn't reset.
+      if (_selectedDoctor != null) {
+        try {
+          _selectedDoctor = _allDoctors.firstWhere(
+            (d) => d.id == _selectedDoctor!.id,
+          );
+        } catch (_) {
+          // If not found in the new list, keep the old reference (handled by the fallback DropdownMenuItem)
+        }
+      }
     });
   }
 
@@ -207,12 +213,18 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
   }
 
   void _onDoctorSelected(DoctorReferral? doctor) {
-    if (doctor != null) {
+    if (doctor != null && widget.existingDoctor == null) {
       setState(() {
         _selectedDoctor = doctor;
-        _visitImage = null; // Reset image when switching doctor
+        _visitImage =
+            null; // Reset image only when switching doctor on New referral
       });
+      // The user wants all fields EXCEPT contact number to be auto-filled if the doctor exists.
+      // And Area should NOT be editable.
+
       _populateFields(doctor);
+      _remarksController.clear();
+      _detailsController.clear();
     }
   }
 
@@ -225,6 +237,43 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
       return;
     }
 
+    // Check if entry is complete
+    final isComplete =
+        _contactController.text.trim().isNotEmpty &&
+        (_selectedSpecialization?.trim().isNotEmpty ?? false) &&
+        (_selectedQualification?.trim().isNotEmpty ?? false) &&
+        _areaController.text.trim().isNotEmpty &&
+        _pinController.text.trim().isNotEmpty &&
+        _visitImage != null;
+
+    if (!isComplete) {
+      // Show confirmation dialog before saving partially
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Save Partial Entry?'),
+          content: const Text(
+            'Some mandatory fields or the visit photo are missing. '
+            'You can save this as an incomplete draft, but you must complete it before ending the trip.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save Draft'),
+            ),
+          ],
+        ),
+      );
+
+      if (proceed != true) return;
+    }
+
+    setState(() => _isLoading = true);
+
     final name = _selectedDoctor!.name;
     final degree = _selectedQualification ?? '';
     final specialization = _selectedSpecialization ?? '';
@@ -236,35 +285,6 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     final pin = _pinController.text.trim();
     final remarks = _remarksController.text.trim();
     final details = _detailsController.text.trim();
-
-    // area and pin are mandatory
-    if (degree.isEmpty ||
-        specialization.isEmpty ||
-        contact.isEmpty ||
-        email.isEmpty ||
-        area.isEmpty ||
-        pin.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill all mandatory fields (*)')),
-      );
-      return;
-    }
-
-    // Image is mandatory
-    // If it's a repeat visit, we MUST require a new image (ignore old one)
-    if (_visitImage == null &&
-        (widget.existingDoctor?.visitImage == null ||
-            (widget.existingDoctor != null &&
-                widget.existingDoctor!.status != 'Assigned'))) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please take a photo of the visit (Mandatory)'),
-        ),
-      );
-      return;
-    }
-
-    setState(() => _isLoading = true);
 
     // Capture Location
     Position? position;
@@ -279,32 +299,37 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     bool success;
 
     // Logic:
-    // - If it's a fresh assignment (status == 'Assigned'), we UPDATE the record to mark it as visited.
-    // - If it was already visited/referred (status == 'Referred'), we CREATE A NEW record for this new visit.
-    bool isRepeatVisit =
+    // We should only UPDATE if we are editing a draft that is ALREADY part of THIS trip.
+    // If the existingDoctor belongs to a different trip, or is a pending "Assigned" doctor,
+    // it means we are starting a NEW visit for this trip, so we must CREATE a new record.
+    bool isEditingCurrentTripVisit =
         widget.existingDoctor != null &&
-        widget.existingDoctor!.status == 'Referred';
+        widget.existingDoctor!.tripId == widget.tripId;
 
-    if (widget.existingDoctor != null && !isRepeatVisit) {
-      // Update existing ASSIGNED doctor (first visit)
-      success =
-          await ApiService.updateDoctorReferral(widget.existingDoctor!.id!, {
-            'trip': widget.tripId,
-            'name': name,
-            'degree_qualification': degree,
-            'specialization': specialization,
-            'contact_number': contact,
-            'email': email,
-            'area': area,
-            'street': street,
-            'city': city,
-            'pin': pin,
-            'remarks': remarks,
-            'additional_details': details,
-            'status': 'Referred',
-            if (position != null) 'visit_lat': position.latitude.toString(),
-            if (position != null) 'visit_long': position.longitude.toString(),
-          }, imagePath: _visitImage?.path);
+    if (isEditingCurrentTripVisit) {
+      // Update existing draft for THIS trip
+      success = await ApiService.updateDoctorReferral(widget.existingDoctor!.id!, {
+        'trip': widget.tripId,
+        'name': name,
+        'degree_qualification': degree,
+        'specialization': specialization,
+        'contact_number': contact,
+        'email': email,
+        'area': area,
+        'street': street,
+        'city': city,
+        'pin': pin,
+        'remarks': remarks,
+        'additional_details': details,
+        'status': 'Referred',
+        // If location was captured, update it. If not, it means the user saved partial without triggering location?
+        if (position != null) 'visit_lat': position.latitude.toString(),
+        if (position != null) 'visit_long': position.longitude.toString(),
+        // Empty image string signals to backend we cleared it, or just omit if no new image.
+        // Wait, if we cleared the image, _visitImage is null.
+        // In ApiService, imagePath: null means it ignores updating the image, it does NOT clear it.
+        // That's fine for now. We mostly care about new records not taking old images.
+      }, imagePath: _visitImage?.path);
     } else {
       // Create new referral (New entry OR Repeat Visit)
       final referral = DoctorReferral(
@@ -339,9 +364,9 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            widget.existingDoctor != null
+            isComplete
                 ? 'Doctor visit completed successfully'
-                : 'Doctor referral added successfully',
+                : 'Doctor partial draft saved successfully',
           ),
         ),
       );
@@ -365,6 +390,14 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         ),
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.white,
+        actions: const [
+          Center(
+            child: Padding(
+              padding: EdgeInsets.only(right: 16.0),
+              child: NetworkIndicator(),
+            ),
+          ),
+        ],
       ),
       backgroundColor: Colors.white, // Ensure white background
       body: SingleChildScrollView(
@@ -549,13 +582,15 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                     isPhone: true,
                   ),
                   const SizedBox(height: 16),
-                  _buildTextField(
-                    _emailController,
-                    "Email ID *",
-                    isEmail: true,
-                  ),
+                  _buildTextField(_emailController, "Email ID", isEmail: true),
                   const SizedBox(height: 16),
-                  _buildTextField(_areaController, "Area *"),
+                  _buildTextField(
+                    _areaController,
+                    "Area *",
+                    readOnly:
+                        _selectedDoctor !=
+                        null, // Make area permanent/read-only if doctor exists
+                  ),
                   const SizedBox(height: 16),
                   _buildTextField(_streetController, "Street"),
                   const SizedBox(height: 16),
@@ -566,7 +601,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                   _buildTextField(
                     _remarksController,
                     "Remarks / Feedback",
-                    maxLines: 3,
+                    maxLines: 6, // Make it bigger as requested
                   ),
                   const SizedBox(height: 16),
                   _buildTextField(
@@ -576,10 +611,22 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                   ),
                   const SizedBox(height: 24),
 
-                  // Visit Image Upload (Mandatory)
-                  const Text(
-                    "Visit Photo *",
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  // Visit Image Upload
+                  Row(
+                    children: [
+                      const Text(
+                        "Visit Photo *",
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        "(Required to End Trip)",
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   GestureDetector(
@@ -591,20 +638,10 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                         color: Colors.grey[200],
                         borderRadius: BorderRadius.circular(15),
                         border: Border.all(
-                          color:
-                              (_visitImage == null &&
-                                  (widget.existingDoctor?.visitImage == null ||
-                                      widget.existingDoctor!.status !=
-                                          'Assigned'))
+                          color: _visitImage == null
                               ? Colors.red.shade300
                               : Colors.grey.shade400,
-                          width:
-                              (_visitImage == null &&
-                                  (widget.existingDoctor?.visitImage == null ||
-                                      widget.existingDoctor!.status !=
-                                          'Assigned'))
-                              ? 2
-                              : 1,
+                          width: _visitImage == null ? 2 : 1,
                         ),
                       ),
                       child: _visitImage != null
@@ -613,18 +650,6 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                               child: Image.file(
                                 File(_visitImage!.path),
                                 fit: BoxFit.cover,
-                              ),
-                            )
-                          : widget.existingDoctor?.visitImage != null &&
-                                widget.existingDoctor!.status == 'Assigned'
-                          ? ClipRRect(
-                              borderRadius: BorderRadius.circular(15),
-                              child: Image.network(
-                                widget.existingDoctor!.visitImage!,
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return const Center(child: Icon(Icons.error));
-                                },
                               ),
                             )
                           : Column(
@@ -647,7 +672,6 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                 ],
               ),
             ),
-            const SizedBox(height: 30),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
@@ -662,14 +686,29 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                 ),
                 child: _isLoading
                     ? const CircularProgressIndicator(color: Colors.white)
-                    : Text(
-                        widget.existingDoctor != null
-                            ? "Save & Mark Referred"
-                            : "Submit Referral",
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
+                    : Builder(
+                        builder: (context) {
+                          bool isComplete =
+                              _contactController.text.trim().isNotEmpty &&
+                              (_selectedSpecialization?.trim().isNotEmpty ??
+                                  false) &&
+                              (_selectedQualification?.trim().isNotEmpty ??
+                                  false) &&
+                              _areaController.text.trim().isNotEmpty &&
+                              _pinController.text.trim().isNotEmpty &&
+                              _visitImage != null;
+                          return Text(
+                            isComplete
+                                ? (widget.existingDoctor != null
+                                      ? "Complete Doctor Visit"
+                                      : "Submit Referral")
+                                : "Save Partial Draft",
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          );
+                        },
                       ),
               ),
             ),

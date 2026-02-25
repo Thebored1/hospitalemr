@@ -9,6 +9,7 @@ import 'doctor_referral_details_screen.dart';
 import 'hotel_stay_details_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart'; // Added for distance calc
+import '../widgets/network_indicator.dart';
 
 class TripDashboardScreen extends StatefulWidget {
   final Trip trip;
@@ -34,37 +35,36 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
   Future<void> _refreshTrip() async {
     setState(() => _isLoading = true);
     try {
-      // Refresh the specific trip by ID
       final updatedTrip = await ApiService.fetchTripById(_trip.id);
-      // Fetch all doctors available in the assigned area
       final allDoctors = await ApiService.fetchDoctorReferrals();
 
-      // Filter logic:
-      // 1. Identify doctors already visited in THIS trip
-      //    (They are already in the timeline, so don't show in 'Pending')
-      final visitedInThisTripNames = _trip.doctorReferrals
+      // Merge server trip with local optimistic visits so offline entries
+      // aren't lost when the server data arrives before the sync completes.
+      Trip currentTrip = _trip;
+      if (updatedTrip != null) {
+        final serverRefIds = updatedTrip.doctorReferrals
+            .map((d) => d.id)
+            .toSet();
+        final localOnly = _trip.doctorReferrals
+            .where((d) => !serverRefIds.contains(d.id))
+            .toList();
+        // Keep server data as base, but inject any local-only optimistic visits
+        final mergedRefs = [...updatedTrip.doctorReferrals, ...localOnly];
+        currentTrip = updatedTrip.copyWith(doctorReferrals: mergedRefs);
+      }
+
+      final visitedInThisTripNames = currentTrip.doctorReferrals
           .map((d) => d.name)
           .toSet();
 
-      // 2. Filter allDoctors:
-      //    - Exclude if in visitedInThisTripNames
-      //    - Deduplicate by Name (keep most recent) to avoid showing multiple history records
       final uniquePending = <String, DoctorReferral>{};
       final seenNames = <String>{};
 
       for (var doc in allDoctors) {
-        // API returns newest first.
-        // If we have already seen this doctor, skip older records.
         if (seenNames.contains(doc.name)) continue;
         seenNames.add(doc.name);
-
         if (visitedInThisTripNames.contains(doc.name)) continue;
-
-        // Now we are looking at the LATEST record for this doctor.
-        // If status is 'Referred', it means the latest action was a visit.
-        // So this doctor is DONE. Do not show in pending.
         if (doc.status == 'Referred') continue;
-
         uniquePending[doc.name] = doc;
       }
 
@@ -72,9 +72,7 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
 
       if (!mounted) return;
       setState(() {
-        if (updatedTrip != null) {
-          _trip = updatedTrip;
-        }
+        _trip = currentTrip;
         _pendingDoctors = pending;
         _isLoading = false;
       });
@@ -217,17 +215,41 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
     );
   }
 
+  /// Returns true if the doctor visit is missing any mandatory fields.
+  bool _isIncomplete(DoctorReferral d) {
+    return d.contactNumber.trim().isEmpty ||
+        d.specialization.trim().isEmpty ||
+        d.degreeQualification.trim().isEmpty ||
+        d.area.trim().isEmpty ||
+        d.pin.trim().isEmpty ||
+        (d.visitImage == null || d.visitImage!.trim().isEmpty);
+  }
+
   void _endTrip() {
+    // Hard block — use _isIncomplete helper
+    final incompleteCount = _trip.doctorReferrals
+        .where((d) => _isIncomplete(d))
+        .length;
+    if (incompleteCount > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '$incompleteCount doctor visit${incompleteCount > 1 ? 's have' : ' has'} incomplete mandatory fields. Tap the ⚠ entry to complete it.',
+          ),
+          backgroundColor: Colors.orange.shade700,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => EndTripScreen(tripId: _trip.id)),
     ).then((result) {
       if (result == true) {
         if (mounted) {
-          Navigator.pop(
-            context,
-            true,
-          ); // Close the dashboard and go back to main screen
+          Navigator.pop(context, true);
         }
       }
     });
@@ -284,6 +306,12 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.only(right: 8.0),
+              child: NetworkIndicator(),
+            ),
+          ),
           if (_isLoading)
             const Padding(
               padding: EdgeInsets.all(16.0),
@@ -724,16 +752,32 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       }
     }
 
+    // For doctor timeline entries, show warning badge if incomplete
+    final bool incompleteEntry = isDoctor && _isIncomplete(item);
+
     return GestureDetector(
       onTap: () {
         if (isDoctor) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) =>
-                  DoctorReferralDetailsScreen(referral: item as DoctorReferral),
-            ),
-          );
+          final doc = item as DoctorReferral;
+          if (incompleteEntry) {
+            // Open edit form so the agent can complete the missing fields
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    DoctorReferralForm(tripId: _trip.id, existingDoctor: doc),
+              ),
+            ).then((refresh) {
+              if (refresh == true) _refreshTrip();
+            });
+          } else {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => DoctorReferralDetailsScreen(referral: doc),
+              ),
+            ).then((_) => _refreshTrip());
+          }
         } else {
           Navigator.push(
             context,
@@ -750,15 +794,49 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
           children: [
             Column(
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.white,
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
-                  child: Icon(icon, size: 20, color: Colors.black),
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: incompleteEntry
+                            ? Colors.orange.shade50
+                            : Colors.white,
+                        border: Border.all(
+                          color: incompleteEntry
+                              ? Colors.orange.shade400
+                              : Colors.grey.shade300,
+                          width: incompleteEntry ? 2 : 1,
+                        ),
+                      ),
+                      child: Icon(
+                        icon,
+                        size: 20,
+                        color: incompleteEntry ? Colors.orange : Colors.black,
+                      ),
+                    ),
+                    if (incompleteEntry)
+                      Positioned(
+                        top: -4,
+                        right: -4,
+                        child: Container(
+                          width: 16,
+                          height: 16,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.orange,
+                          ),
+                          child: const Icon(
+                            Icons.priority_high,
+                            size: 10,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
                 if (!isLast)
                   Expanded(
@@ -806,6 +884,28 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
                       ],
                     ),
                     Text(subtitle, style: const TextStyle(color: Colors.grey)),
+                    if (incompleteEntry)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4, bottom: 2),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.warning_amber_rounded,
+                              size: 14,
+                              color: Colors.orange,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              "Incomplete Draft - Tap to complete",
+                              style: TextStyle(
+                                color: Colors.orange.shade800,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     Text(
                       DateFormat('hh:mm a').format(time.toLocal()),
                       style: TextStyle(

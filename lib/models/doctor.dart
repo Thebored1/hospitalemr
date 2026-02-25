@@ -73,12 +73,16 @@ class DoctorReferral {
 
     if (addressDetails != null) {
       street = addressDetails['street'];
-      pin = addressDetails['pincode'] ?? '';
 
       // Get area info from area_details within address_details
       if (areaDetails != null) {
         area = areaDetails['name'] ?? '';
         city = areaDetails['city'];
+        pin = areaDetails['pincode'] ?? ''; // Moved to area in backend
+      } else {
+        pin =
+            addressDetails['pincode'] ??
+            ''; // Fallback for older data structure
       }
     }
 

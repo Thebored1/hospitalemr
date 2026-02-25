@@ -1,17 +1,22 @@
 import 'dart:convert';
-import 'dart:math' show asin, cos, sqrt; // Import math functions
+import 'dart:io';
+import 'dart:math' show asin, cos, sqrt;
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/task.dart';
 import '../models/doctor.dart';
 import '../models/patient_referral.dart';
 import '../models/trip.dart';
+import 'database_helper.dart';
 
 class ApiService {
   // Use http://127.0.0.1:8000 for Windows/Web
   // Use http://10.0.2.2:8000 for Android Emulator
   // Use ngrok for physical devices
-  static const String baseUrl = 'https://hospitalemr-backend.onrender.com/api';
+  static const String baseUrl =
+      'https://definite-toucan-highly.ngrok-free.app/api';
 
   static String? _authToken;
   static String? _userRole; // 'advisor', 'maintenance', 'admin'
@@ -53,6 +58,33 @@ class ApiService {
     await prefs.remove('auth_username');
   }
 
+  // --- API Caching Helpers ---
+  static Future<void> _cacheApiResponse(String key, String data) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('api_cache_$key', data);
+  }
+
+  static Future<String?> _getCachedApiResponse(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('api_cache_$key');
+  }
+
+  static Future<void> _clearCachedApiResponse(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('api_cache_$key');
+  }
+
+  static Future<String> _getAppDocumentsPath() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return dir.path;
+  }
+
+  /// Returns true if the device has a real network connection.
+  static Future<bool> _isOnline() async {
+    final result = await Connectivity().checkConnectivity();
+    return result.isNotEmpty && result.first != ConnectivityResult.none;
+  }
+
   // --- Authentication ---
   static Future<bool> login(String username, String password) async {
     try {
@@ -89,6 +121,9 @@ class ApiService {
   /// Fetch all doctors from master table for dropdown selection
   static Future<List<DoctorReferral>> fetchAllDoctors() async {
     if (_authToken == null) return [];
+
+    final dbHelper = DatabaseHelper();
+
     try {
       final response = await http
           .get(
@@ -103,12 +138,20 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
-        return data.map((json) => DoctorReferral.fromJson(json)).toList();
+        final doctors = data
+            .map((json) => DoctorReferral.fromJson(json))
+            .toList();
+        // Cache them locally
+        await dbHelper.cacheDoctors(doctors);
+        return doctors;
       }
     } catch (e) {
-      print('Fetch All Doctors Error: $e');
+      print('Fetch All Doctors Error (Offline?): $e');
     }
-    return [];
+
+    // Fallback: Return cached data
+    print('Returning cached doctors fallback');
+    return await dbHelper.getCachedDoctors();
   }
 
   /// Fetch all specializations for dropdown selection
@@ -127,13 +170,26 @@ class ApiService {
           .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
+        // Cache the raw JSON string
+        await _cacheApiResponse('specializations', response.body);
+
         final List<dynamic> data = json.decode(response.body);
         return data
             .map((item) => {'id': item['id'], 'name': item['name'] as String})
             .toList();
       }
     } catch (e) {
-      print('Fetch Specializations Error: $e');
+      print('Fetch Specializations Error (Offline?): $e');
+    }
+
+    // Fallback to cache
+    final cached = await _getCachedApiResponse('specializations');
+    if (cached != null) {
+      print('Returning cached specializations fallback');
+      final List<dynamic> data = json.decode(cached);
+      return data
+          .map((item) => {'id': item['id'], 'name': item['name'] as String})
+          .toList();
     }
     return [];
   }
@@ -154,13 +210,26 @@ class ApiService {
           .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
+        // Cache the raw JSON string
+        await _cacheApiResponse('qualifications', response.body);
+
         final List<dynamic> data = json.decode(response.body);
         return data
             .map((item) => {'id': item['id'], 'name': item['name'] as String})
             .toList();
       }
     } catch (e) {
-      print('Fetch Qualifications Error: $e');
+      print('Fetch Qualifications Error (Offline?): $e');
+    }
+
+    // Fallback to cache
+    final cached = await _getCachedApiResponse('qualifications');
+    if (cached != null) {
+      print('Returning cached qualifications fallback');
+      final List<dynamic> data = json.decode(cached);
+      return data
+          .map((item) => {'id': item['id'], 'name': item['name'] as String})
+          .toList();
     }
     return [];
   }
@@ -181,11 +250,18 @@ class ApiService {
           .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
+        await _cacheApiResponse('tasks', response.body);
         final List<dynamic> data = json.decode(response.body);
         return data.map((json) => Task.fromJson(json)).toList();
       }
     } catch (e) {
-      print('Fetch Tasks Error: $e');
+      print('Fetch Tasks Error (Offline?): $e');
+    }
+
+    final cached = await _getCachedApiResponse('tasks');
+    if (cached != null) {
+      final List<dynamic> data = json.decode(cached);
+      return data.map((json) => Task.fromJson(json)).toList();
     }
     return [];
   }
@@ -255,18 +331,26 @@ class ApiService {
         headers: {
           'Authorization': 'Token $_authToken',
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       );
 
       if (response.statusCode == 200) {
-        // If no trip is ongoing, body might be null or empty depending on API design,
-        // but our view returns `null` or valid JSON.
-        // `Response(None)` in DRF usually returns empty body or null.
         if (response.body == 'null' || response.body.isEmpty) return null;
+        await _cacheApiResponse('current_trip', response.body);
         return Trip.fromJson(json.decode(response.body));
       }
     } catch (e) {
-      print('Fetch Current Trip Error: $e');
+      print('Fetch Current Trip Error (Offline?): $e');
+    }
+
+    final cached = await _getCachedApiResponse('current_trip');
+    if (cached != null && cached != 'null' && cached.isNotEmpty) {
+      try {
+        return Trip.fromJson(json.decode(cached));
+      } catch (e) {
+        print("Mismatched cached format for current_trip: $e");
+      }
     }
     return null;
   }
@@ -279,14 +363,21 @@ class ApiService {
         headers: {
           'Authorization': 'Token $_authToken',
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       );
 
       if (response.statusCode == 200) {
+        await _cacheApiResponse('trip_$id', response.body);
         return Trip.fromJson(json.decode(response.body));
       }
     } catch (e) {
-      print('Fetch Trip By ID Error: $e');
+      print('Fetch Trip By ID Error (Offline?): $e');
+    }
+
+    final cached = await _getCachedApiResponse('trip_$id');
+    if (cached != null) {
+      return Trip.fromJson(json.decode(cached));
     }
     return null;
   }
@@ -299,15 +390,54 @@ class ApiService {
         headers: {
           'Authorization': 'Token $_authToken',
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       );
 
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
-        return data.map((json) => Trip.fromJson(json)).toList();
+        final newTrips = data.map((j) => Trip.fromJson(j)).toList();
+        final newTripIds = newTrips.map((t) => t.id).toSet();
+
+        // Clear stale individual trip caches for deleted trips
+        final oldCached = await _getCachedApiResponse('trips');
+        if (oldCached != null) {
+          try {
+            final oldData = json.decode(oldCached) as List<dynamic>;
+            for (final oldTrip in oldData) {
+              final oldId = oldTrip['id'];
+              if (oldId != null && !newTripIds.contains(oldId)) {
+                await _clearCachedApiResponse('trip_$oldId');
+                print('Cleared stale cache for deleted trip $oldId');
+              }
+            }
+          } catch (_) {}
+        }
+
+        // If current_trip was deleted, clear it too
+        final cachedCurrent = await _getCachedApiResponse('current_trip');
+        if (cachedCurrent != null) {
+          try {
+            final currentTrip = json.decode(cachedCurrent);
+            final currentId = currentTrip['id'];
+            if (currentId != null && !newTripIds.contains(currentId)) {
+              await _clearCachedApiResponse('current_trip');
+              print('Cleared stale cache for deleted current_trip $currentId');
+            }
+          } catch (_) {}
+        }
+
+        await _cacheApiResponse('trips', response.body);
+        return newTrips;
       }
     } catch (e) {
-      print('Fetch Trips Error: $e');
+      print('Fetch Trips Error (Offline?): $e');
+    }
+
+    final cached = await _getCachedApiResponse('trips');
+    if (cached != null) {
+      final List<dynamic> data = json.decode(cached);
+      return data.map((json) => Trip.fromJson(json)).toList();
     }
     return [];
   }
@@ -316,6 +446,7 @@ class ApiService {
     String? odometerStartPath, {
     double? lat,
     double? long,
+    bool isSync = false,
   }) async {
     if (_authToken == null) return null;
     try {
@@ -347,6 +478,27 @@ class ApiService {
       }
     } catch (e) {
       print('Start Trip Error: $e');
+      if (!isSync) {
+        print('Queueing Start Trip for offline sync...');
+        // Generate a temporary integer ID for the trip to be used locally
+        final tempTripId = DateTime.now().millisecondsSinceEpoch % 1000000;
+
+        final payload = {
+          'tempTripId': tempTripId,
+          'odometerStartPath': odometerStartPath,
+          'lat': lat,
+          'long': long,
+        };
+        await DatabaseHelper().enqueueSyncAction('START_TRIP', payload);
+
+        // Return a dummy Trip so the UI can navigate to TripDashboardScreen
+        return Trip(
+          id: tempTripId,
+          tripNumber: 0, // Gets overridden visually or ignored
+          status: 'ONGOING',
+          startTime: DateTime.now(),
+        );
+      }
     }
     return null;
   }
@@ -358,6 +510,7 @@ class ApiService {
     String? odometerEndPath, {
     double? lat,
     double? long,
+    bool isSync = false,
   }) async {
     if (_authToken == null) return null;
     try {
@@ -391,6 +544,28 @@ class ApiService {
       }
     } catch (e) {
       print('End Trip Error: $e');
+
+      if (!isSync) {
+        print('Queueing End Trip for offline sync...');
+        final payload = {
+          'tripId': tripId,
+          'kilometers': kilometers,
+          'expenses': expenses,
+          'odometerEndPath': odometerEndPath,
+          'lat': lat,
+          'long': long,
+        };
+        await DatabaseHelper().enqueueSyncAction('END_TRIP', payload);
+
+        // Optimistically return a dummy updated trip to satisfy the UI
+        return Trip(
+          id: tripId,
+          tripNumber: 0,
+          status: 'COMPLETED',
+          startTime: DateTime.now(),
+          totalKilometers: kilometers,
+        );
+      }
     }
     return null;
   }
@@ -441,6 +616,7 @@ class ApiService {
         headers: {
           'Authorization': 'Token $_authToken',
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       );
 
@@ -463,15 +639,23 @@ class ApiService {
         headers: {
           'Authorization': 'Token $_authToken',
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       );
 
       if (response.statusCode == 200) {
+        await _cacheApiResponse('doctor_referrals', response.body);
         final List<dynamic> data = json.decode(response.body);
         return data.map((json) => DoctorReferral.fromJson(json)).toList();
       }
     } catch (e) {
-      print('Fetch Doctor Referrals Error: $e');
+      print('Fetch Doctor Referrals Error (Offline?): $e');
+    }
+
+    final cached = await _getCachedApiResponse('doctor_referrals');
+    if (cached != null) {
+      final List<dynamic> data = json.decode(cached);
+      return data.map((json) => DoctorReferral.fromJson(json)).toList();
     }
     return [];
   }
@@ -482,8 +666,21 @@ class ApiService {
     String? imagePath,
     double? lat,
     double? long,
+    bool isSync = false,
   }) async {
     if (_authToken == null) return false;
+
+    // Pre-check connectivity — skip HTTP entirely when offline (avoids long hangs)
+    if (!isSync && !(await _isOnline())) {
+      return _queueCreateDoctorReferral(
+        referral,
+        tripId,
+        imagePath: imagePath,
+        lat: lat,
+        long: long,
+      );
+    }
+
     try {
       var request = http.MultipartRequest(
         'POST',
@@ -516,7 +713,9 @@ class ApiService {
         );
       }
 
-      final streamedResponse = await request.send();
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 10),
+      );
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 201) {
@@ -524,20 +723,95 @@ class ApiService {
       } else {
         print('Create Doctor Referral Failed: ${response.statusCode}');
         print('Body: ${response.body}');
+        if (!isSync) {
+          // Server rejected — queue for later retry rather than silently dropping
+          // (e.g. temporary 500 error)
+        }
         return false;
       }
     } catch (e) {
       print('Create Doctor Referral Error: $e');
+      if (!isSync) {
+        return _queueCreateDoctorReferral(
+          referral,
+          tripId,
+          imagePath: imagePath,
+          lat: lat,
+          long: long,
+        );
+      }
       return false;
     }
+  }
+
+  /// Extracted offline-queue logic for createDoctorReferral.
+  static Future<bool> _queueCreateDoctorReferral(
+    DoctorReferral referral,
+    int tripId, {
+    String? imagePath,
+    double? lat,
+    double? long,
+  }) async {
+    print('Queueing doctor referral for offline sync...');
+
+    String? persistentImagePath = imagePath;
+    if (imagePath != null) {
+      try {
+        final appDir = await _getAppDocumentsPath();
+        final fileName =
+            'offline_visit_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        final destPath = '$appDir/$fileName';
+        await File(imagePath).copy(destPath);
+        persistentImagePath = destPath;
+        print('Offline image saved permanently: $destPath');
+      } catch (imgErr) {
+        print('Could not persist offline image: $imgErr');
+      }
+    }
+
+    final payload = {
+      'referral': referral.toJson(),
+      'tripId': tripId,
+      'imagePath': persistentImagePath,
+      'lat': lat,
+      'long': long,
+    };
+    await DatabaseHelper().enqueueSyncAction('CREATE_DOCTOR_REFERRAL', payload);
+
+    // Optimistic UI update
+    try {
+      final cachedTripStr = await _getCachedApiResponse('trip_$tripId');
+      if (cachedTripStr != null) {
+        final tripData = json.decode(cachedTripStr);
+        final refs = List<dynamic>.from(tripData['doctor_referrals'] ?? []);
+        final dummyRef = referral.toJson();
+        dummyRef['id'] = DateTime.now().millisecondsSinceEpoch;
+        dummyRef['trip'] = tripId;
+        dummyRef['status'] = 'Referred';
+        dummyRef['created_at'] = DateTime.now().toIso8601String();
+        refs.insert(0, dummyRef);
+        tripData['doctor_referrals'] = refs;
+        await _cacheApiResponse('trip_$tripId', json.encode(tripData));
+      }
+    } catch (e) {
+      print('Optimistic cache error: $e');
+    }
+    return true;
   }
 
   static Future<bool> updateDoctorReferral(
     int id,
     Map<String, dynamic> data, {
     String? imagePath,
+    bool isSync = false,
   }) async {
     if (_authToken == null) return false;
+
+    // Pre-check connectivity — skip HTTP entirely when offline
+    if (!isSync && !(await _isOnline())) {
+      return _queueUpdateDoctorReferral(id, data, imagePath: imagePath);
+    }
+
     try {
       // Use MultipartRequest for updates if image is present or to keep consistency
       var request = http.MultipartRequest(
@@ -558,10 +832,47 @@ class ApiService {
         );
       }
 
-      final streamedResponse = await request.send();
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 10),
+      );
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
+        // Also update local cache so the UI refreshes immediately
+        try {
+          final tripIdRaw = data['trip'];
+          if (tripIdRaw != null) {
+            final tripId = int.tryParse(tripIdRaw.toString());
+            if (tripId != null) {
+              final cachedTripStr = await _getCachedApiResponse('trip_$tripId');
+              if (cachedTripStr != null) {
+                final tripData = json.decode(cachedTripStr);
+                final refs = List<dynamic>.from(
+                  tripData['doctor_referrals'] ?? [],
+                );
+                final idx = refs.indexWhere((r) => r['id'] == id);
+                if (idx >= 0) {
+                  // Merge the updated data over the existing record
+                  final existing = Map<String, dynamic>.from(refs[idx]);
+                  data.forEach((key, value) {
+                    if (value != null) existing[key] = value;
+                  });
+                  if (imagePath != null) {
+                    existing['visit_image'] = imagePath;
+                  }
+                  refs[idx] = existing;
+                  tripData['doctor_referrals'] = refs;
+                  await _cacheApiResponse(
+                    'trip_$tripId',
+                    json.encode(tripData),
+                  );
+                }
+              }
+            }
+          }
+        } catch (cacheErr) {
+          print('Synchronous cache update error: $cacheErr');
+        }
         return true;
       } else {
         print('Update Doctor Referral Failed: ${response.statusCode}');
@@ -570,8 +881,94 @@ class ApiService {
       }
     } catch (e) {
       print('Update Doctor Referral Error: $e');
+      if (!isSync) {
+        return _queueUpdateDoctorReferral(id, data, imagePath: imagePath);
+      }
       return false;
     }
+  }
+
+  /// Extracted offline-queue logic for updateDoctorReferral.
+  static Future<bool> _queueUpdateDoctorReferral(
+    int id,
+    Map<String, dynamic> data, {
+    String? imagePath,
+  }) async {
+    String? persistentImagePath = imagePath;
+    if (imagePath != null) {
+      try {
+        final appDir = await _getAppDocumentsPath();
+        final fileName =
+            'offline_update_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        final destPath = '$appDir/$fileName';
+        await File(imagePath).copy(destPath);
+        persistentImagePath = destPath;
+        print('Offline update image saved permanently: $destPath');
+      } catch (imgErr) {
+        print('Could not persist offline update image: $imgErr');
+      }
+    }
+
+    final payload = {'id': id, 'data': data, 'imagePath': persistentImagePath};
+    await DatabaseHelper().enqueueSyncAction('UPDATE_DOCTOR_REFERRAL', payload);
+
+    // Optimistic UI update — find and update or create the trip cache entry
+    try {
+      final tripIdRaw = data['trip'];
+      if (tripIdRaw != null) {
+        final tripId = int.tryParse(tripIdRaw.toString());
+        if (tripId != null) {
+          final updatedRef = {
+            'id': id,
+            'trip': tripId,
+            'name': data['name'] ?? '',
+            'degree_qualification': data['degree_qualification'] ?? '',
+            'specialization': data['specialization'] ?? '',
+            'contact_number': data['contact_number'] ?? '',
+            'area': data['area'] ?? '',
+            'street': data['street'] ?? '',
+            'city': data['city'] ?? '',
+            'pin': data['pin'] ?? '',
+            'email': data['email'] ?? '',
+            'remarks': data['remarks'] ?? '',
+            'additional_details': data['additional_details'] ?? '',
+            'status': 'Referred',
+            'visit_image': persistentImagePath, // Keep local image proxy
+            'created_at': DateTime.now().toIso8601String(),
+          };
+
+          final cachedTripStr = await _getCachedApiResponse('trip_$tripId');
+          Map<String, dynamic> tripData;
+          if (cachedTripStr != null) {
+            tripData = json.decode(cachedTripStr);
+          } else {
+            // Offline trip — no cache yet. Create a skeleton so the UI shows activity.
+            tripData = {
+              'id': tripId,
+              'trip_number': 0,
+              'status': 'ongoing',
+              'start_time': DateTime.now().toIso8601String(),
+              'end_time': null,
+              'doctor_referrals': [],
+              'patient_referrals': [],
+            };
+          }
+
+          final refs = List<dynamic>.from(tripData['doctor_referrals'] ?? []);
+          final idx = refs.indexWhere((r) => r['id'] == id);
+          if (idx >= 0) {
+            refs[idx] = updatedRef;
+          } else {
+            refs.insert(0, updatedRef);
+          }
+          tripData['doctor_referrals'] = refs;
+          await _cacheApiResponse('trip_$tripId', json.encode(tripData));
+        }
+      }
+    } catch (e) {
+      print('Optimistic cache error: $e');
+    }
+    return true;
   }
 
   static Future<bool> markDoctorAsVisited(int doctorId, int tripId) async {
@@ -601,39 +998,75 @@ class ApiService {
   // --- Patient Referrals ---
   static Future<List<PatientReferral>> fetchPatientReferrals() async {
     if (_authToken == null) return [];
+
+    final dbHelper = DatabaseHelper();
+
     try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/patient-referrals/'),
-        headers: {
-          'Authorization': 'Token $_authToken',
-          'Content-Type': 'application/json',
-        },
-      );
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/patient-referrals/'),
+            headers: {
+              'Authorization': 'Token $_authToken',
+              'Content-Type': 'application/json',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
-        return data.map((json) => PatientReferral.fromJson(json)).toList();
+        final patients = data
+            .map((json) => PatientReferral.fromJson(json))
+            .toList();
+        await dbHelper.cachePatients(patients);
+        return patients;
       }
     } catch (e) {
-      print('Fetch Patient Referrals Error: $e');
+      print('Fetch Patient Referrals Error (Offline?): $e');
     }
-    return [];
+
+    // Fallback: Read from Cache
+    print('Returning cached patients fallback');
+    return await dbHelper.getCachedPatients();
   }
 
-  static Future<bool> createPatientReferral(PatientReferral referral) async {
+  static Future<bool> createPatientReferral(
+    PatientReferral referral, {
+    bool isSync = false,
+  }) async {
     if (_authToken == null) return false;
+
     try {
-      final response = await http.post(
-        Uri.parse('$baseUrl/patient-referrals/'),
-        headers: {
-          'Authorization': 'Token $_authToken',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode(referral.toJson()),
-      );
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/patient-referrals/'),
+            headers: {
+              'Authorization': 'Token $_authToken',
+              'Content-Type': 'application/json',
+            },
+            body: json.encode(referral.toJson()),
+          )
+          .timeout(const Duration(seconds: 15));
+
       return response.statusCode == 201;
     } catch (e) {
       print('Create Patient Referral Error: $e');
+
+      // If NOT running from SyncService, queue it for later!
+      if (!isSync) {
+        print('Queueing patient creation for offline sync...');
+        await DatabaseHelper().enqueueSyncAction(
+          'CREATE_PATIENT',
+          referral.toJson(),
+        );
+
+        // Optimistically cache it locally so User sees it immediately
+        final db = DatabaseHelper();
+        final currentPatients = await db.getCachedPatients();
+        currentPatients.insert(0, referral); // prepend to list
+        await db.cachePatients(currentPatients);
+
+        return true; // We accept it locally!
+      }
       return false;
     }
   }

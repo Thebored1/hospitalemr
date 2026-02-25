@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/patient_referral.dart';
 import '../models/doctor.dart';
 import '../services/api_service.dart';
+import '../widgets/network_indicator.dart';
 
 class AddPatientScreen extends StatefulWidget {
   const AddPatientScreen({super.key});
@@ -230,6 +231,8 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
                       ),
                     ),
                   ),
+                  const NetworkIndicator(),
+                  const SizedBox(width: 8),
                   Container(
                     width: 40,
                     height: 40,

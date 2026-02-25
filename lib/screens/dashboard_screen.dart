@@ -6,6 +6,7 @@ import 'add_ticket_screen.dart';
 import 'task_detail_screen.dart';
 import 'login_screen.dart';
 import '../services/api_service.dart';
+import '../widgets/network_indicator.dart';
 
 class DashboardScreen extends StatefulWidget {
   final VoidCallback? onProfileTap;
@@ -99,6 +100,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   Row(
                     children: [
+                      const NetworkIndicator(),
+                      const SizedBox(width: 8),
                       GestureDetector(
                         onTap: () async {
                           // Logout logic

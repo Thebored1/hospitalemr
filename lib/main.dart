@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart'; // Added for kIsWeb
 import 'screens/login_screen.dart';
 import 'widgets/role_switcher.dart';
 import 'services/api_service.dart';
+import 'services/sync_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,6 +22,10 @@ void main() async {
     // High refresh rate not supported on this device
     debugPrint('Failed to set high refresh rate: $e');
   }
+
+  // Initialize SyncService singleton so its connectivity listener is registered.
+  // This is what triggers syncPendingData() when the device regains network.
+  SyncService();
 
   runApp(const StaffApp());
 }

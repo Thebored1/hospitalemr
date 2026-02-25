@@ -57,19 +57,6 @@ class _EndTripScreenState extends State<EndTripScreen> {
     _checkLocationPermission();
     _checkLocationPermission();
     _calculateTotalDistance();
-    _checkLostImage();
-  }
-
-  Future<void> _checkLostImage() async {
-    final lostImage = await CameraService.checkForLostImage();
-    if (lostImage != null && mounted) {
-      setState(() {
-        _endImage = lostImage;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Restored photo from previous session')),
-      );
-    }
   }
 
   Future<void> _checkLocationPermission() async {

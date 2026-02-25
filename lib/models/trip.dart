@@ -71,6 +71,43 @@ class Trip {
     this.overnightStays = const [],
   });
 
+  Trip copyWith({
+    int? id,
+    int? tripNumber,
+    DateTime? startTime,
+    DateTime? endTime,
+    String? status,
+    String? odometerStartImagePath,
+    String? odometerEndImagePath,
+    double? totalKilometers,
+    String? additionalExpenses,
+    double? startLat,
+    double? startLong,
+    double? endLat,
+    double? endLong,
+    List<DoctorReferral>? doctorReferrals,
+    List<OvernightStay>? overnightStays,
+  }) {
+    return Trip(
+      id: id ?? this.id,
+      tripNumber: tripNumber ?? this.tripNumber,
+      startTime: startTime ?? this.startTime,
+      endTime: endTime ?? this.endTime,
+      status: status ?? this.status,
+      odometerStartImagePath:
+          odometerStartImagePath ?? this.odometerStartImagePath,
+      odometerEndImagePath: odometerEndImagePath ?? this.odometerEndImagePath,
+      totalKilometers: totalKilometers ?? this.totalKilometers,
+      additionalExpenses: additionalExpenses ?? this.additionalExpenses,
+      startLat: startLat ?? this.startLat,
+      startLong: startLong ?? this.startLong,
+      endLat: endLat ?? this.endLat,
+      endLong: endLong ?? this.endLong,
+      doctorReferrals: doctorReferrals ?? this.doctorReferrals,
+      overnightStays: overnightStays ?? this.overnightStays,
+    );
+  }
+
   factory Trip.fromJson(Map<String, dynamic> json) {
     return Trip(
       id: json['id'],
