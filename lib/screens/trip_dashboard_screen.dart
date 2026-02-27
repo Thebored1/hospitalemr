@@ -54,18 +54,20 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       }
 
       final visitedInThisTripNames = currentTrip.doctorReferrals
-          .map((d) => d.name)
+          .map((d) => d.name.trim().toLowerCase())
+          .where((name) => name.isNotEmpty)
           .toSet();
 
       final uniquePending = <String, DoctorReferral>{};
       final seenNames = <String>{};
 
       for (var doc in allDoctors) {
-        if (seenNames.contains(doc.name)) continue;
-        seenNames.add(doc.name);
-        if (visitedInThisTripNames.contains(doc.name)) continue;
-        if (doc.status == 'Referred') continue;
-        uniquePending[doc.name] = doc;
+        final nameKey = doc.name.trim().toLowerCase();
+        if (nameKey.isEmpty) continue;
+        if (visitedInThisTripNames.contains(nameKey)) continue;
+        if (seenNames.contains(nameKey)) continue;
+        seenNames.add(nameKey);
+        uniquePending[nameKey] = doc;
       }
 
       final pending = uniquePending.values.toList();

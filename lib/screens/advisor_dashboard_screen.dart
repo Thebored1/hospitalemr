@@ -105,9 +105,13 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
   List<DoctorReferral> get _pendingDoctors {
     final seen = <String>{};
     return _assignedDoctors
-        .where((doc) => seen.add(doc.name)) // First occurrence (Newest) wins
-        .where((doc) => doc.status == 'Assigned') // Only show unvisited
-        .toList();
+    // Backend already filters by current assignment + visited/disabled state.
+    // Do not rely on global doctor.status here.
+    .where((doc) {
+      final key = doc.name.trim().toLowerCase();
+      return key.isNotEmpty && seen.add(key);
+    }) // First occurrence (Newest) wins
+    .toList();
   }
 
   Widget _buildAssignedDoctorsNotification() {
