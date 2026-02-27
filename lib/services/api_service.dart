@@ -15,7 +15,7 @@ class ApiService {
   // Use http://127.0.0.1:8000 for Windows/Web
   // Use http://10.0.2.2:8000 for Android Emulator
   // Use ngrok for physical devices
-  static const String baseUrl = 'https://hospitalemr-backend.onrender.com/api';
+  static const String baseUrl = 'http://127.0.0.1:8000/api';
 
   static String? _authToken;
   static String? _userRole; // 'advisor', 'maintenance', 'admin'
