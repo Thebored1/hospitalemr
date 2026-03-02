@@ -73,17 +73,43 @@ class DoctorReferral {
 
     if (addressDetails != null) {
       street = addressDetails['street'];
+      final addressPin = (addressDetails['pincode'] ?? '').toString().trim();
 
       // Get area info from area_details within address_details
       if (areaDetails != null) {
-        area = areaDetails['name'] ?? '';
-        city = areaDetails['city'];
-        pin = areaDetails['pincode'] ?? ''; // Moved to area in backend
+        area = (areaDetails['name'] ?? '').toString().trim();
+
+        final areaCity = (areaDetails['city'] ?? '').toString().trim();
+        if (areaCity.isNotEmpty) {
+          city = areaCity;
+        }
+
+        // Prefer the Address pin saved with this referral, then fallback to Area pin.
+        final areaPin = (areaDetails['pincode'] ?? '').toString().trim();
+        pin = addressPin.isNotEmpty ? addressPin : areaPin;
       } else {
-        pin =
-            addressDetails['pincode'] ??
-            ''; // Fallback for older data structure
+        pin = addressPin;
       }
+    }
+
+    // Legacy fallback for older/offline-cached payloads that still carry flat fields.
+    if (area.isEmpty) {
+      area = (json['area'] ?? '').toString().trim();
+    }
+    if (street?.trim().isEmpty ?? true) {
+      final legacyStreet = (json['street'] ?? '').toString().trim();
+      if (legacyStreet.isNotEmpty) {
+        street = legacyStreet;
+      }
+    }
+    if (city?.trim().isEmpty ?? true) {
+      final legacyCity = (json['city'] ?? '').toString().trim();
+      if (legacyCity.isNotEmpty) {
+        city = legacyCity;
+      }
+    }
+    if (pin.isEmpty) {
+      pin = (json['pin'] ?? '').toString().trim();
     }
 
     return DoctorReferral(

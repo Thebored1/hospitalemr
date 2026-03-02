@@ -46,12 +46,16 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
   // Image Picking
   // final ImagePicker _picker = ImagePicker(); -- removed for CameraService
   XFile? _visitImage;
+  bool _hasExistingVisitImage = false;
 
   @override
   void initState() {
     super.initState();
     if (widget.existingDoctor != null) {
-      if (widget.existingDoctor!.tripId == widget.tripId) {
+      final isEditingCurrentTripVisit =
+          widget.existingDoctor!.tripId == widget.tripId;
+
+      if (isEditingCurrentTripVisit) {
         // Editing an existing visit in this trip (e.g. continuing a partial draft)
         _populateFields(widget.existingDoctor!);
       } else {
@@ -60,6 +64,11 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         _remarksController.clear();
         _detailsController.clear();
       }
+
+      // Existing image is only valid when editing the same trip record.
+      _hasExistingVisitImage =
+          isEditingCurrentTripVisit &&
+          (widget.existingDoctor!.visitImage?.trim().isNotEmpty ?? false);
       _selectedDoctor = widget.existingDoctor;
     }
     _loadAllDoctors();
@@ -208,7 +217,10 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
 
     final XFile? image = await CameraService.takePicture();
     if (image != null) {
-      setState(() => _visitImage = image);
+      setState(() {
+        _visitImage = image;
+        _hasExistingVisitImage = true;
+      });
     }
   }
 
@@ -218,6 +230,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         _selectedDoctor = doctor;
         _visitImage =
             null; // Reset image only when switching doctor on New referral
+        _hasExistingVisitImage = false;
       });
       // The user wants all fields EXCEPT contact number to be auto-filled if the doctor exists.
       // And Area should NOT be editable.
@@ -237,6 +250,18 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
       return;
     }
 
+    final hasVisitImage = _visitImage != null || _hasExistingVisitImage;
+    if (!hasVisitImage) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Visit photo is mandatory, even for partial draft save.',
+          ),
+        ),
+      );
+      return;
+    }
+
     // Check if entry is complete
     final isComplete =
         _contactController.text.trim().isNotEmpty &&
@@ -244,7 +269,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         (_selectedQualification?.trim().isNotEmpty ?? false) &&
         _areaController.text.trim().isNotEmpty &&
         _pinController.text.trim().isNotEmpty &&
-        _visitImage != null;
+        hasVisitImage;
 
     if (!isComplete) {
       // Show confirmation dialog before saving partially
@@ -253,7 +278,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         builder: (ctx) => AlertDialog(
           title: const Text('Save Partial Entry?'),
           content: const Text(
-            'Some mandatory fields or the visit photo are missing. '
+            'Some mandatory fields are missing. '
             'You can save this as an incomplete draft, but you must complete it before ending the trip.',
           ),
           actions: [
@@ -333,6 +358,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     } else {
       // Create new referral (New entry OR Repeat Visit)
       final referral = DoctorReferral(
+        id: _selectedDoctor!.id,
         name: name,
         contactNumber: contact,
         area: area,
@@ -620,7 +646,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        "(Required to End Trip)",
+                        "(Required for Draft & End Trip)",
                         style: TextStyle(
                           color: Colors.grey.shade600,
                           fontSize: 12,
@@ -638,10 +664,12 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                         color: Colors.grey[200],
                         borderRadius: BorderRadius.circular(15),
                         border: Border.all(
-                          color: _visitImage == null
-                              ? Colors.red.shade300
-                              : Colors.grey.shade400,
-                          width: _visitImage == null ? 2 : 1,
+                          color: (_visitImage != null || _hasExistingVisitImage)
+                              ? Colors.grey.shade400
+                              : Colors.red.shade300,
+                          width: (_visitImage != null || _hasExistingVisitImage)
+                              ? 1
+                              : 2,
                         ),
                       ),
                       child: _visitImage != null
@@ -651,6 +679,27 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                                 File(_visitImage!.path),
                                 fit: BoxFit.cover,
                               ),
+                            )
+                          : _hasExistingVisitImage
+                          ? Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: const [
+                                Icon(
+                                  Icons.check_circle,
+                                  size: 36,
+                                  color: Colors.green,
+                                ),
+                                SizedBox(height: 8),
+                                Text(
+                                  "Existing visit photo attached",
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                                SizedBox(height: 4),
+                                Text(
+                                  "Tap to retake photo",
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                              ],
                             )
                           : Column(
                               mainAxisAlignment: MainAxisAlignment.center,
@@ -688,6 +737,8 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : Builder(
                         builder: (context) {
+                          final hasVisitImage =
+                              _visitImage != null || _hasExistingVisitImage;
                           bool isComplete =
                               _contactController.text.trim().isNotEmpty &&
                               (_selectedSpecialization?.trim().isNotEmpty ??
@@ -696,7 +747,16 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                                   false) &&
                               _areaController.text.trim().isNotEmpty &&
                               _pinController.text.trim().isNotEmpty &&
-                              _visitImage != null;
+                              hasVisitImage;
+                          if (!hasVisitImage) {
+                            return const Text(
+                              "Add Visit Photo to Continue",
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            );
+                          }
                           return Text(
                             isComplete
                                 ? (widget.existingDoctor != null

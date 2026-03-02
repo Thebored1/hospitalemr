@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import '../widgets/role_switcher.dart';
@@ -117,9 +118,9 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Email Field
+                    // Phone Number Field
                     const Text(
-                      "Email",
+                      "Phone Number",
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
@@ -135,9 +136,13 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       child: TextField(
                         controller: _emailController,
-                        keyboardType: TextInputType.emailAddress,
+                        keyboardType: TextInputType.phone,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(10),
+                        ],
                         decoration: const InputDecoration(
-                          hintText: "your.email@example.com",
+                          hintText: "Enter your 10-digit phone number",
                           border: InputBorder.none,
                           contentPadding: EdgeInsets.symmetric(vertical: 16),
                         ),
