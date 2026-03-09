@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import '../widgets/role_switcher.dart';
+import '../services/sync_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -56,6 +57,8 @@ class _LoginScreenState extends State<LoginScreen> {
     final success = await ApiService.login(username, password);
 
     if (success && mounted) {
+      // Kick off a sync in case there are queued offline actions.
+      SyncService().syncPendingData();
       // Save credentials if Remember Me is checked
       final prefs = await SharedPreferences.getInstance();
       if (_rememberMe) {

@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart'; // Added for distance calc
 import '../models/patient_referral.dart';
 import '../models/doctor.dart';
 import '../services/api_service.dart';
+import '../utils/trip_queue_processor.dart';
 import '../widgets/tap_to_call_text.dart'; // Added import
 import 'add_patient_screen.dart';
 import 'trip_dashboard_screen.dart';
@@ -26,9 +29,13 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
   List<PatientReferral> _patients = [];
   List<Trip> _trips = [];
   List<DoctorReferral> _assignedDoctors = []; // Doctors assigned by admin
+  Set<String> _visitedDoctorNames = {};
   bool _isLoading = true;
   TabController? _tabController;
   String _searchQuery = '';
+  Map<int, bool> _queuedTripMap = {};
+  StreamSubscription<void>? _queueSubscription;
+  StreamSubscription<void>? _dataSubscription;
 
   @override
   void initState() {
@@ -39,6 +46,8 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
       });
     });
     _fetchData();
+    _queueSubscription = ApiService.queueStream.listen((_) => _fetchData());
+    _dataSubscription = ApiService.dataStream.listen((_) => _fetchData());
   }
 
   Future<void> _fetchData() async {
@@ -49,12 +58,35 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
       final doctors = await ApiService.fetchDoctorReferrals();
       // Sort trips by start time descending
       trips.sort((a, b) => b.startTime.compareTo(a.startTime));
+      final queuedMapRaw =
+          await ApiService.queuedActionsGroupedByTrip();
+      final processedTrips = trips
+          .map((trip) => TripQueueProcessor.mergeTripWithQueue(
+                trip,
+                queuedMapRaw[trip.id] ?? [],
+              ))
+          .toList();
+      final visitedNames = <String>{};
+      for (final trip in processedTrips) {
+        for (final doc in trip.doctorReferrals) {
+          final nameKey = doc.name.trim().toLowerCase();
+          if (nameKey.isNotEmpty) {
+            visitedNames.add(nameKey);
+          }
+        }
+      }
+      final queuedMap = <int, bool>{};
+      queuedMapRaw.forEach((key, value) {
+        queuedMap[key] = value.isNotEmpty;
+      });
 
       if (mounted) {
         setState(() {
           _patients = patients;
-          _trips = trips;
+          _trips = processedTrips;
           _assignedDoctors = doctors;
+          _visitedDoctorNames = visitedNames;
+          _queuedTripMap = queuedMap;
           _isLoading = false;
         });
       }
@@ -68,6 +100,8 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
   void dispose() {
     _searchController.dispose();
     _tabController?.dispose();
+    _queueSubscription?.cancel();
+    _dataSubscription?.cancel();
     super.dispose();
   }
 
@@ -109,7 +143,9 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
     // Do not rely on global doctor.status here.
     .where((doc) {
       final key = doc.name.trim().toLowerCase();
-      return key.isNotEmpty && seen.add(key);
+      return key.isNotEmpty &&
+          !_visitedDoctorNames.contains(key) &&
+          seen.add(key);
     }) // First occurrence (Newest) wins
     .toList();
   }
@@ -781,7 +817,10 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
                                     ),
                                   ).then((_) => _fetchData());
                                 },
-                                child: TripCard(trip: trip),
+                                child: TripCard(
+                                  trip: trip,
+                                  hasQueuedSync: _queuedTripMap[trip.id] ?? false,
+                                ),
                               ),
                             ),
                           ),
@@ -932,8 +971,13 @@ class PatientCard extends StatelessWidget {
 
 class TripCard extends StatelessWidget {
   final Trip trip;
+  final bool hasQueuedSync;
 
-  const TripCard({super.key, required this.trip});
+  const TripCard({
+    super.key,
+    required this.trip,
+    this.hasQueuedSync = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1011,6 +1055,23 @@ class TripCard extends StatelessWidget {
               ),
             ],
           ),
+          if (hasQueuedSync)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.sync, size: 16, color: Colors.orange),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Queued for sync',
+                    style: TextStyle(
+                      color: Colors.orange.shade800,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 16),
           Row(
             children: [

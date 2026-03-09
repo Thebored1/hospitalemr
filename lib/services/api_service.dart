@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' show asin, cos, sqrt;
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -12,18 +13,49 @@ import '../models/trip.dart';
 import 'database_helper.dart';
 
 class ApiService {
-  // Use http://127.0.0.1:8000 for Windows/Web
-  // Use http://10.0.2.2:8000 for Android Emulator
-  // Use ngrok for physical devices
-  static const String baseUrl = 'https://hospitalemr-backend.onrender.com/api';
+
+  static const String baseUrl =
+      'http://192.168.1.7:8000/api';
 
   static String? _authToken;
   static String? _userRole; // 'advisor', 'maintenance', 'admin'
   static String? _username;
 
+  static final StreamController<void> _queueUpdateController =
+      StreamController<void>.broadcast();
+  static Stream<void> get queueStream => _queueUpdateController.stream;
+  static void notifyQueueUpdated() {
+    if (!_queueUpdateController.isClosed) {
+      _queueUpdateController.add(null);
+    }
+  }
+
+  static final StreamController<void> _dataUpdateController =
+      StreamController<void>.broadcast();
+  static Stream<void> get dataStream => _dataUpdateController.stream;
+  static void notifyDataUpdated() {
+    if (!_dataUpdateController.isClosed) {
+      _dataUpdateController.add(null);
+    }
+  }
+
   static bool get isAuthenticated => _authToken != null;
   static String? get userRole => _userRole;
   static String? get username => _username;
+
+  static final StreamController<String> _errorController =
+      StreamController<String>.broadcast();
+  static Stream<String> get errorStream => _errorController.stream;
+  static String? lastErrorMessage;
+
+  static void _reportError(String message) {
+    lastErrorMessage = message;
+    _errorController.add(message);
+  }
+
+  static void reportError(String message) {
+    _reportError(message);
+  }
 
   // --- Session Persistence ---
   static Future<void> _saveSession() async {
@@ -82,6 +114,19 @@ class ApiService {
   static Future<bool> _isOnline() async {
     final result = await Connectivity().checkConnectivity();
     return result.isNotEmpty && result.first != ConnectivityResult.none;
+  }
+
+  static Future<bool> tripHasQueuedSync(int tripId) async {
+    return await DatabaseHelper().hasQueuedActionsForTrip(tripId);
+  }
+
+  static Future<Map<int, List<Map<String, dynamic>>>>
+      queuedActionsGroupedByTrip() async {
+    return await DatabaseHelper().queuedActionsGroupedByTrip();
+  }
+
+  static Future<List<Map<String, dynamic>>> queuedActionsForTrip(int tripId) async {
+    return await DatabaseHelper().queuedActionsForTrip(tripId);
   }
 
   // --- Authentication ---
@@ -561,6 +606,7 @@ class ApiService {
       'long': long,
     };
     await DatabaseHelper().enqueueSyncAction('START_TRIP', payload);
+    notifyQueueUpdated();
 
     final offlineTrip = Trip(
       id: tempTripId,
@@ -645,6 +691,16 @@ class ApiService {
     bool isSync = false,
   }) async {
     if (_authToken == null) return null;
+    if (!isSync && !(await _isOnline())) {
+      return _queueEndTripOffline(
+        tripId,
+        kilometers,
+        expenses,
+        odometerEndPath,
+        lat: lat,
+        long: long,
+      );
+    }
     try {
       var request = http.MultipartRequest(
         'PATCH',
@@ -673,33 +729,141 @@ class ApiService {
 
       if (response.statusCode == 200) {
         return Trip.fromJson(json.decode(response.body));
+      } else {
+        _reportError(
+          'Failed to end trip (${response.statusCode}). Please try again.',
+        );
       }
     } catch (e) {
       print('End Trip Error: $e');
-
+      _reportError('End Trip Error: $e');
       if (!isSync) {
-        print('Queueing End Trip for offline sync...');
-        final payload = {
-          'tripId': tripId,
-          'kilometers': kilometers,
-          'expenses': expenses,
-          'odometerEndPath': odometerEndPath,
-          'lat': lat,
-          'long': long,
-        };
-        await DatabaseHelper().enqueueSyncAction('END_TRIP', payload);
-
-        // Optimistically return a dummy updated trip to satisfy the UI
-        return Trip(
-          id: tripId,
-          tripNumber: 0,
-          status: 'COMPLETED',
-          startTime: DateTime.now(),
-          totalKilometers: kilometers,
+        return _queueEndTripOffline(
+          tripId,
+          kilometers,
+          expenses,
+          odometerEndPath,
+          lat: lat,
+          long: long,
         );
       }
     }
     return null;
+  }
+
+  static Future<Trip?> _queueEndTripOffline(
+    int tripId,
+    double kilometers,
+    String expenses,
+    String? odometerEndPath, {
+    double? lat,
+    double? long,
+  }) async {
+    print('Queueing End Trip for offline sync...');
+    _reportError(
+      'You are offline—this trip end has been queued and will sync when the network is available.',
+    );
+    final payload = {
+      'tripId': tripId,
+      'kilometers': kilometers,
+      'expenses': expenses,
+      'odometerEndPath': odometerEndPath,
+      'lat': lat,
+      'long': long,
+    };
+    await DatabaseHelper().enqueueSyncAction('END_TRIP', payload);
+    notifyQueueUpdated();
+    final tripData = await _cacheTripEndLocally(
+      tripId: tripId,
+      kilometers: kilometers,
+      expenses: expenses,
+      odometerEndPath: odometerEndPath,
+      lat: lat,
+      long: long,
+    );
+    final startTimeStr = tripData['start_time'] as String? ??
+        DateTime.now().toIso8601String();
+    final tripNumberRaw = tripData['trip_number'];
+    final tripNumber = tripNumberRaw is int
+        ? tripNumberRaw
+        : int.tryParse(tripNumberRaw?.toString() ?? '') ?? 0;
+    return Trip(
+      id: tripId,
+      tripNumber: tripNumber,
+      startTime: DateTime.parse(startTimeStr),
+      endTime: DateTime.parse(tripData['end_time'] as String),
+      status: 'COMPLETED',
+      totalKilometers: kilometers,
+      additionalExpenses: expenses,
+      odometerEndImagePath: odometerEndPath,
+      endLat: lat,
+      endLong: long,
+    );
+  }
+
+  static Future<Map<String, dynamic>> _cacheTripEndLocally({
+    required int tripId,
+    required double kilometers,
+    required String expenses,
+    String? odometerEndPath,
+    double? lat,
+    double? long,
+  }) async {
+    final nowStr = DateTime.now().toIso8601String();
+    Map<String, dynamic> tripData = {};
+    final cachedTripStr = await _getCachedApiResponse('trip_$tripId');
+    if (cachedTripStr != null) {
+      tripData = Map<String, dynamic>.from(json.decode(cachedTripStr));
+    } else {
+      tripData = _tripToCacheJson(
+        Trip(
+          id: tripId,
+          tripNumber: 0,
+          status: 'ONGOING',
+          startTime: DateTime.now(),
+        ),
+      );
+    }
+
+    tripData['status'] = 'COMPLETED';
+    tripData['total_kilometers'] = kilometers;
+    tripData['additional_expenses'] = expenses;
+    if (odometerEndPath != null && odometerEndPath.trim().isNotEmpty) {
+      tripData['odometer_end_image'] = odometerEndPath;
+    }
+    if (lat != null) tripData['end_lat'] = lat;
+    if (long != null) tripData['end_long'] = long;
+    tripData['end_time'] = nowStr;
+
+    await _cacheApiResponse('trip_$tripId', json.encode(tripData));
+
+    final currentTripStr = await _getCachedApiResponse('current_trip');
+    if (currentTripStr != null) {
+      final currentTrip = Map<String, dynamic>.from(json.decode(currentTripStr));
+      if (currentTrip['id'] == tripId) {
+        currentTrip.addAll(tripData);
+        await _cacheApiResponse('current_trip', json.encode(currentTrip));
+      }
+    }
+
+    final tripsStr = await _getCachedApiResponse('trips');
+    if (tripsStr != null) {
+      final tripsList = List<dynamic>.from(json.decode(tripsStr));
+      bool updated = false;
+      for (int i = 0; i < tripsList.length; i++) {
+        final entry = tripsList[i];
+        if (entry is Map<String, dynamic> && entry['id'] == tripId) {
+          tripsList[i] = {...entry, ...tripData};
+          updated = true;
+          break;
+        }
+      }
+      if (updated) {
+        await _cacheApiResponse('trips', json.encode(tripsList));
+      }
+    }
+
+    return tripData;
   }
 
   static Future<bool> addOvernightStay(
@@ -709,8 +873,19 @@ class ApiService {
     String billPath,
     double? lat,
     double? long,
+    {bool isSync = false}
   ) async {
     if (_authToken == null) return false;
+    if (!isSync && !(await _isOnline())) {
+      return _queueAddOvernightStay(
+        tripId,
+        name,
+        address,
+        billPath,
+        lat,
+        long,
+      );
+    }
     try {
       var request = http.MultipartRequest(
         'POST',
@@ -731,10 +906,60 @@ class ApiService {
       final response = await http.Response.fromStream(streamedResponse);
 
       return response.statusCode == 201;
-    } catch (e) {
-      print('Add Overnight Stay Error: $e');
-      return false;
+      } catch (e) {
+        print('Add Overnight Stay Error: $e');
+        _reportError('Add Overnight Stay Error: $e');
+        if (!isSync) {
+          return _queueAddOvernightStay(
+            tripId,
+            name,
+            address,
+            billPath,
+            lat,
+            long,
+          );
+        }
+        return false;
+      }
     }
+
+  static Future<bool> _queueAddOvernightStay(
+    int tripId,
+    String name,
+    String address,
+    String billPath,
+    double? lat,
+    double? long,
+  ) async {
+    print('Queueing overnight stay for offline sync...');
+    _reportError(
+      'You are offline—this hotel stay has been queued and will sync when the network returns.',
+    );
+    String? persistentBillPath = billPath;
+    if (billPath.trim().isNotEmpty) {
+      try {
+        final appDir = await _getAppDocumentsPath();
+        final fileName =
+            'offline_overnight_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        final destPath = '$appDir/$fileName';
+        await File(billPath).copy(destPath);
+        persistentBillPath = destPath;
+      } catch (e) {
+        print('Could not persist offline overnight stay image: $e');
+      }
+    }
+
+    final payload = {
+      'tripId': tripId,
+      'name': name,
+      'address': address,
+      'billPath': persistentBillPath,
+      'lat': lat,
+      'long': long,
+    };
+    await DatabaseHelper().enqueueSyncAction('ADD_OVERNIGHT_STAY', payload);
+    notifyQueueUpdated();
+    return true;
   }
 
   // --- Doctor Referrals ---
@@ -802,6 +1027,9 @@ class ApiService {
   }) async {
     if (_authToken == null) return false;
     if (imagePath == null || imagePath.trim().isEmpty) {
+      if (isSync) {
+        _reportError('Cannot sync doctor visit: missing visit image.');
+      }
       return false;
     }
 
@@ -817,6 +1045,10 @@ class ApiService {
     }
 
     try {
+      if (!File(imagePath).existsSync()) {
+        _reportError('Cannot sync doctor visit: image file not found.');
+        return false;
+      }
       var request = http.MultipartRequest(
         'POST',
         Uri.parse('$baseUrl/doctor-referrals/'),
@@ -855,10 +1087,14 @@ class ApiService {
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 201 || response.statusCode == 200) {
+        notifyDataUpdated();
         return true;
       } else {
         print('Create Doctor Referral Failed: ${response.statusCode}');
         print('Body: ${response.body}');
+        _reportError(
+          'Failed to sync doctor visit (${response.statusCode}).',
+        );
         if (!isSync) {
           // Server rejected — queue for later retry rather than silently dropping
           // (e.g. temporary 500 error)
@@ -867,6 +1103,7 @@ class ApiService {
       }
     } catch (e) {
       print('Create Doctor Referral Error: $e');
+      _reportError('Failed to sync doctor visit: $e');
       if (!isSync) {
         return _queueCreateDoctorReferral(
           referral,
@@ -890,6 +1127,7 @@ class ApiService {
   }) async {
     print('Queueing doctor referral for offline sync...');
 
+    final optimisticId = referral.id ?? DateTime.now().millisecondsSinceEpoch;
     String? persistentImagePath = imagePath;
     if (imagePath != null) {
       try {
@@ -911,8 +1149,11 @@ class ApiService {
       'imagePath': persistentImagePath,
       'lat': lat,
       'long': long,
+      'tempId': optimisticId,
     };
     await DatabaseHelper().enqueueSyncAction('CREATE_DOCTOR_REFERRAL', payload);
+    notifyQueueUpdated();
+    notifyDataUpdated();
 
     // Optimistic UI update
     try {
@@ -936,7 +1177,7 @@ class ApiService {
       final refs = List<dynamic>.from(tripData['doctor_referrals'] ?? []);
       final optimisticRef = {
         // Keep stable id for same-doctor edits while offline; fallback for brand-new doctors.
-        'id': referral.id ?? DateTime.now().millisecondsSinceEpoch,
+        'id': optimisticId,
         'trip': tripId,
         'name': referral.name,
         'contact_number': referral.contactNumber,
@@ -1044,6 +1285,7 @@ class ApiService {
         } catch (cacheErr) {
           print('Synchronous cache update error: $cacheErr');
         }
+        notifyDataUpdated();
         return true;
       } else {
         print('Update Doctor Referral Failed: ${response.statusCode}');
@@ -1080,8 +1322,22 @@ class ApiService {
       }
     }
 
-    final payload = {'id': id, 'data': data, 'imagePath': persistentImagePath};
-    await DatabaseHelper().enqueueSyncAction('UPDATE_DOCTOR_REFERRAL', payload);
+    final db = DatabaseHelper();
+    final merged = await db.mergeQueuedDoctorReferralUpdate(
+      id,
+      data,
+      imagePath: persistentImagePath,
+    );
+    if (!merged) {
+      final payload = {
+        'id': id,
+        'data': data,
+        'imagePath': persistentImagePath,
+        'tempId': id,
+      };
+      await db.enqueueSyncAction('UPDATE_DOCTOR_REFERRAL', payload);
+    }
+    notifyQueueUpdated();
 
     // Optimistic UI update — find and update or create the trip cache entry
     try {
@@ -1159,8 +1415,12 @@ class ApiService {
     return true;
   }
 
-  static Future<bool> markDoctorAsVisited(int doctorId, int tripId) async {
+  static Future<bool> markDoctorAsVisited(int doctorId, int tripId,
+      {bool isSync = false}) async {
     if (_authToken == null) return false;
+    if (!isSync && !(await _isOnline())) {
+      return _queueMarkDoctorVisited(doctorId, tripId);
+    }
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/doctor-referrals/$doctorId/mark_visited/'),
@@ -1175,12 +1435,30 @@ class ApiService {
       } else {
         print('Mark Doctor Visited Failed: ${response.statusCode}');
         print('Body: ${response.body}');
+        _reportError(
+          'Failed to mark doctor as visited (${response.statusCode}).',
+        );
         return false;
       }
     } catch (e) {
       print('Mark Doctor Visited Error: $e');
+      _reportError('Mark Doctor Visited Error: $e');
+      if (!isSync) {
+        return _queueMarkDoctorVisited(doctorId, tripId);
+      }
       return false;
     }
+  }
+
+  static Future<bool> _queueMarkDoctorVisited(int doctorId, int tripId) async {
+    print('Queueing doctor visited mark for offline sync...');
+    _reportError(
+      'You are offline—doctor visit completion will sync once you reconnect.',
+    );
+    final payload = {'doctorId': doctorId, 'tripId': tripId};
+    await DatabaseHelper().enqueueSyncAction('MARK_DOCTOR_VISITED', payload);
+    notifyQueueUpdated();
+    return true;
   }
 
   // --- Patient Referrals ---
@@ -1246,6 +1524,7 @@ class ApiService {
           'CREATE_PATIENT',
           referral.toJson(),
         );
+        notifyQueueUpdated();
 
         // Optimistically cache it locally so User sees it immediately
         final db = DatabaseHelper();

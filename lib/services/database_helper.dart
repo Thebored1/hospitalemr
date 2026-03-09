@@ -239,20 +239,26 @@ class DatabaseHelper {
       bool changed = false;
 
       // CREATE_DOCTOR_REFERRAL stores tripId at top level
-      if (payload.containsKey('tripId') && payload['tripId'] == tempTripId) {
-        payload['tripId'] = realTripId;
-        changed = true;
+      if (payload.containsKey('tripId')) {
+        final storedTripId = int.tryParse(payload['tripId'].toString());
+        if (storedTripId == tempTripId) {
+          payload['tripId'] = realTripId;
+          changed = true;
+        }
       }
 
       // UPDATE_DOCTOR_REFERRAL stores trip inside payload['data']['trip']
       if (payload.containsKey('data') && payload['data'] is Map) {
         final data = Map<String, dynamic>.from(payload['data'] as Map);
-        final storedTrip = data['trip'];
-        if (storedTrip != null &&
-            int.tryParse(storedTrip.toString()) == tempTripId) {
-          data['trip'] = realTripId;
-          payload['data'] = data;
-          changed = true;
+        final storedTrip = data['trip'] ?? data['trip_id'];
+        if (storedTrip != null) {
+          final storedTripId = int.tryParse(storedTrip.toString());
+          if (storedTripId == tempTripId) {
+            data['trip'] = realTripId;
+            data.remove('trip_id');
+            payload['data'] = data;
+            changed = true;
+          }
         }
       }
 
@@ -265,5 +271,163 @@ class DatabaseHelper {
         );
       }
     }
+  }
+
+  Future<bool> mergeQueuedDoctorReferralUpdate(
+    int tempId,
+    Map<String, dynamic> data, {
+    String? imagePath,
+  }) async {
+    final db = await database;
+    final rows = await db.query('sync_queue', orderBy: 'created_at ASC');
+    final tripIdRaw = data['trip'] ?? data['trip_id'];
+    final tripId = tripIdRaw != null ? int.tryParse(tripIdRaw.toString()) : null;
+    final dataName = (data['name'] ?? '').toString().trim().toLowerCase();
+    for (final row in rows) {
+      if (row['action'] != 'CREATE_DOCTOR_REFERRAL') continue;
+      final payload = jsonDecode(row['payload'] as String) as Map<String, dynamic>;
+      final payloadTempId = payload['tempId'];
+      bool matches = false;
+      if (payloadTempId != null) {
+        final payloadTempIdInt = int.tryParse(payloadTempId.toString());
+        if (payloadTempIdInt == tempId) {
+          matches = true;
+        }
+      }
+      if (!matches && tripId != null) {
+        final payloadTripId = int.tryParse(payload['tripId']?.toString() ?? '');
+        if (payloadTripId == tripId) {
+          final referral = payload['referral'];
+          if (referral is Map<String, dynamic>) {
+            final payloadName =
+                (referral['name'] ?? '').toString().trim().toLowerCase();
+            if (payloadName.isNotEmpty && payloadName == dataName) {
+              matches = true;
+            }
+          }
+        }
+      }
+      if (!matches) continue;
+
+      final referral = payload['referral'];
+      if (referral is Map<String, dynamic>) {
+        data.forEach((key, value) {
+          if (value != null) {
+            referral[key] = value;
+          }
+        });
+        payload['referral'] = referral;
+      }
+      if (imagePath != null && imagePath.isNotEmpty) {
+        payload['imagePath'] = imagePath;
+      }
+
+      await db.update(
+        'sync_queue',
+        {'payload': jsonEncode(payload)},
+        where: 'id = ?',
+        whereArgs: [row['id']],
+      );
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> hasQueuedActionsForTrip(int tripId) async {
+    final db = await database;
+    final rows = await db.query('sync_queue');
+    for (var row in rows) {
+      final payload = jsonDecode(row['payload'] as String) as Map<String, dynamic>;
+      if (_payloadReferencesTrip(payload, tripId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<List<Map<String, dynamic>>> queuedActionsForTrip(int tripId) async {
+    final db = await database;
+    final rows = await db.query('sync_queue', orderBy: 'created_at ASC');
+    final result = <Map<String, dynamic>>[];
+    for (var row in rows) {
+      final payload = jsonDecode(row['payload'] as String) as Map<String, dynamic>;
+      if (_payloadReferencesTrip(payload, tripId)) {
+        final map = Map<String, dynamic>.from(row);
+        map['payload'] = payload;
+        result.add(map);
+      }
+    }
+    return result;
+  }
+
+  Future<Map<int, List<Map<String, dynamic>>>> queuedActionsGroupedByTrip() async {
+    final db = await database;
+    final rows = await db.query('sync_queue', orderBy: 'created_at ASC');
+    final grouped = <int, List<Map<String, dynamic>>>{};
+
+    for (var row in rows) {
+      final payload = jsonDecode(row['payload'] as String) as Map<String, dynamic>;
+      final tripIds = _extractTripIdsFromPayload(payload);
+      if (tripIds.isEmpty) continue;
+
+      for (final tripId in tripIds) {
+        grouped.putIfAbsent(tripId, () => []).add({
+          'id': row['id'],
+          'action': row['action'],
+          'payload': payload,
+          'created_at': row['created_at'],
+        });
+      }
+    }
+
+    return grouped;
+  }
+
+  bool _payloadReferencesTrip(Map<String, dynamic> payload, int tripId) {
+    if (payload['tripId'] != null &&
+        int.tryParse(payload['tripId'].toString()) == tripId) {
+      return true;
+    }
+
+    if (payload.containsKey('data')) {
+      final data = payload['data'];
+      if (data is Map<String, dynamic>) {
+        final nestedTrip = data['trip'];
+        if (nestedTrip != null &&
+            int.tryParse(nestedTrip.toString()) == tripId) {
+          return true;
+        }
+      } else if (data is Map) {
+        final nestedTrip = data['trip'];
+        if (nestedTrip != null &&
+            int.tryParse(nestedTrip.toString()) == tripId) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  List<int> _extractTripIdsFromPayload(Map<String, dynamic> payload) {
+    final ids = <int>{};
+
+    if (payload['tripId'] != null) {
+      final parsed = int.tryParse(payload['tripId'].toString());
+      if (parsed != null) ids.add(parsed);
+    }
+
+    if (payload.containsKey('data')) {
+      final data = payload['data'];
+      final nestedTrip = (data is Map<String, dynamic>)
+          ? data['trip']
+          : (data is Map ? data['trip'] : null);
+      if (nestedTrip != null) {
+        final parsed = int.tryParse(nestedTrip.toString());
+        if (parsed != null) ids.add(parsed);
+      }
+    }
+
+    return ids.toList();
   }
 }

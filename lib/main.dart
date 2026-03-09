@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +10,9 @@ import 'screens/login_screen.dart';
 import 'widgets/role_switcher.dart';
 import 'services/api_service.dart';
 import 'services/sync_service.dart';
+
+final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,12 +35,42 @@ void main() async {
   runApp(const StaffApp());
 }
 
-class StaffApp extends StatelessWidget {
+class StaffApp extends StatefulWidget {
   const StaffApp({super.key});
+
+  @override
+  State<StaffApp> createState() => _StaffAppState();
+}
+
+class _StaffAppState extends State<StaffApp> {
+  StreamSubscription<String>? _errorSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _errorSubscription = ApiService.errorStream.listen((message) {
+      final messenger = scaffoldMessengerKey.currentState;
+      if (messenger != null) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _errorSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      scaffoldMessengerKey: scaffoldMessengerKey,
       debugShowCheckedModeBanner: false,
       title: 'Hospital EMR',
       theme: ThemeData(

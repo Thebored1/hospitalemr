@@ -178,12 +178,14 @@ class _EndTripScreenState extends State<EndTripScreen> {
 
     if (successTrip != null) {
       if (!mounted) return;
-      Navigator.pop(context, true); // Return to Dashboard with success signal
+      Navigator.pop(context, successTrip); // Return updated trip
     } else {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Failed to end trip.')));
+      if (ApiService.lastErrorMessage == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to end trip.')),
+        );
+      }
     }
   }
 

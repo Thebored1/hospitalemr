@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/trip.dart';
 import '../models/doctor.dart';
@@ -9,6 +11,7 @@ import 'doctor_referral_details_screen.dart';
 import 'hotel_stay_details_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart'; // Added for distance calc
+import '../utils/trip_queue_processor.dart';
 import '../widgets/network_indicator.dart';
 
 class TripDashboardScreen extends StatefulWidget {
@@ -24,12 +27,17 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
   bool _isLoading = false;
   List<DoctorReferral> _pendingDoctors =
       []; // Doctors assigned by admin but not visited yet
+  bool _hasQueuedSync = false;
+  StreamSubscription<void>? _queueSubscription;
 
   @override
   void initState() {
     super.initState();
     _trip = widget.trip;
     _refreshTrip();
+    _queueSubscription = ApiService.queueStream.listen((_) {
+      if (mounted) _refreshTrip();
+    });
   }
 
   Future<void> _refreshTrip() async {
@@ -40,31 +48,31 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
 
       // Merge server trip with local optimistic visits so offline entries
       // aren't lost when the server data arrives before the sync completes.
-      Trip currentTrip = _trip;
-      if (updatedTrip != null) {
-        final serverRefIds = updatedTrip.doctorReferrals
-            .map((d) => d.id)
-            .toSet();
-        final localOnly = _trip.doctorReferrals
-            .where((d) => !serverRefIds.contains(d.id))
-            .toList();
-        // Keep server data as base, but inject any local-only optimistic visits
-        final mergedRefs = [...updatedTrip.doctorReferrals, ...localOnly];
-        currentTrip = updatedTrip.copyWith(doctorReferrals: mergedRefs);
-      }
+      final Trip currentTrip = updatedTrip ?? _trip;
+      final queueItems = await ApiService.queuedActionsForTrip(currentTrip.id);
+      final displayedTrip =
+          TripQueueProcessor.mergeTripWithQueue(currentTrip, queueItems);
 
-      final visitedInThisTripNames = currentTrip.doctorReferrals
-          .map((d) => d.name.trim().toLowerCase())
-          .where((name) => name.isNotEmpty)
-          .toSet();
+      final visitedIds = <int>{};
+      final visitedNames = <String>{};
+      for (final doc in displayedTrip.doctorReferrals) {
+        if (doc.id != null) {
+          visitedIds.add(doc.id!);
+        }
+        final nameKey = doc.name.trim().toLowerCase();
+        if (nameKey.isNotEmpty) {
+          visitedNames.add(nameKey);
+        }
+      }
 
       final uniquePending = <String, DoctorReferral>{};
       final seenNames = <String>{};
 
       for (var doc in allDoctors) {
+        if (doc.id != null && visitedIds.contains(doc.id)) continue;
         final nameKey = doc.name.trim().toLowerCase();
         if (nameKey.isEmpty) continue;
-        if (visitedInThisTripNames.contains(nameKey)) continue;
+        if (visitedNames.contains(nameKey)) continue;
         if (seenNames.contains(nameKey)) continue;
         seenNames.add(nameKey);
         uniquePending[nameKey] = doc;
@@ -74,9 +82,10 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
 
       if (!mounted) return;
       setState(() {
-        _trip = currentTrip;
+        _trip = displayedTrip;
         _pendingDoctors = pending;
         _isLoading = false;
+        _hasQueuedSync = queueItems.isNotEmpty;
       });
     } catch (e) {
       debugPrint("Error refreshing trip: $e");
@@ -84,6 +93,7 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       setState(() => _isLoading = false);
     }
   }
+
 
   void _navigateToAddDoctor() {
     if (_pendingDoctors.isEmpty) {
@@ -95,6 +105,15 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       return;
     }
 
+    final searchController = TextEditingController();
+    String? selectedArea;
+    final areaOptions = _pendingDoctors
+        .map((doc) => doc.area.trim())
+        .where((area) => area.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+
     // Show bottom sheet with pending doctors to select from
     showModalBottomSheet(
       context: context,
@@ -103,116 +122,230 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.6,
-        minChildSize: 0.4,
-        maxChildSize: 0.9,
-        expand: false,
-        builder: (context, scrollController) => Column(
-          children: [
-            // Handle bar
-            Container(
-              width: 40,
-              height: 4,
-              margin: const EdgeInsets.only(top: 12, bottom: 8),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            // Title
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  const Icon(Icons.person_add, color: Colors.blue),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Text(
-                      'Select Doctor to Visit',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return DraggableScrollableSheet(
+            initialChildSize: 0.6,
+            minChildSize: 0.4,
+            maxChildSize: 0.9,
+            expand: false,
+            builder: (context, scrollController) {
+              final query = searchController.text.trim().toLowerCase();
+              final filtered = query.isEmpty
+                  ? _pendingDoctors
+                  : _pendingDoctors.where((doc) {
+                      final name = doc.name.toLowerCase();
+                      final address = doc.fullAddress.toLowerCase();
+                      final spec = doc.specialization.toLowerCase();
+                      return name.contains(query) ||
+                          address.contains(query) ||
+                          spec.contains(query);
+                    }).toList();
+              final areaFiltered = selectedArea == null
+                  ? filtered
+                  : filtered.where((doc) {
+                      return doc.area.trim().toLowerCase() ==
+                          selectedArea!.trim().toLowerCase();
+                    }).toList();
+
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).viewInsets.bottom,
+                ),
+                child: Column(
+                  children: [
+                    // Handle bar
+                    Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(top: 12, bottom: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
                       ),
                     ),
-                  ),
-                  // Removed "Add New" button to force selection from assigned list
-                ],
-              ),
-            ),
-            const Divider(height: 1),
-            // Pending doctors list
-            Expanded(
-              child: ListView.builder(
-                controller: scrollController,
-                itemCount: _pendingDoctors.length,
-                itemBuilder: (context, index) {
-                  final doc = _pendingDoctors[index];
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: Colors.blue.shade100,
-                      child: Icon(Icons.person, color: Colors.blue.shade700),
-                    ),
-                    title: Text(
-                      doc.name,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (doc.specialization.isNotEmpty)
-                          Text(doc.specialization),
-                        if (doc.fullAddress.isNotEmpty)
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.location_on,
-                                size: 12,
-                                color: Colors.grey,
+                    // Title
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.person_add, color: Colors.blue),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Text(
+                              'Select Doctor to Visit',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
                               ),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  doc.fullAddress,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          // Removed "Add New" button to force selection from assigned list
+                        ],
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Column(
+                        children: [
+                          TextField(
+                            controller: searchController,
+                            onChanged: (_) => setModalState(() {}),
+                            decoration: InputDecoration(
+                              hintText: 'Search by name or location',
+                              prefixIcon: const Icon(Icons.search),
+                              filled: true,
+                              fillColor: Colors.grey.shade100,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade300),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    BorderSide(color: Colors.grey.shade300),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 10,
+                              ),
+                            ),
+                          ),
+                          if (areaOptions.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            DropdownButtonFormField<String>(
+                              value: selectedArea,
+                              isExpanded: true,
+                              dropdownColor: Colors.white,
+                              decoration: InputDecoration(
+                                hintText: 'Filter by area',
+                                prefixIcon: const Icon(Icons.place_outlined),
+                                filled: true,
+                                fillColor: Colors.white,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide:
+                                      BorderSide(color: Colors.grey.shade300),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide:
+                                      BorderSide(color: Colors.grey.shade300),
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
                                 ),
                               ),
-                            ],
-                          ),
-                      ],
+                              items: [
+                                const DropdownMenuItem<String>(
+                                  value: null,
+                                  child: Text('All areas'),
+                                ),
+                                ...areaOptions.map(
+                                  (area) => DropdownMenuItem<String>(
+                                    value: area,
+                                    child: Text(area),
+                                  ),
+                                ),
+                              ],
+                              onChanged: (value) {
+                                setModalState(() {
+                                  selectedArea = value;
+                                });
+                              },
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
-                    trailing: const Icon(
-                      Icons.check_circle_outline,
-                      color: Colors.green,
+                    const Divider(height: 1),
+                    // Pending doctors list
+                    Expanded(
+                      child: areaFiltered.isEmpty
+                          ? const Center(
+                              child: Text('No doctors match your search.'),
+                            )
+                          : ListView.builder(
+                              controller: scrollController,
+                              itemCount: areaFiltered.length,
+                              itemBuilder: (context, index) {
+                                final doc = areaFiltered[index];
+                                return ListTile(
+                                  leading: CircleAvatar(
+                                    backgroundColor: Colors.blue.shade100,
+                                    child: Icon(
+                                      Icons.person,
+                                      color: Colors.blue.shade700,
+                                    ),
+                                  ),
+                                  title: Text(
+                                    doc.name,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (doc.specialization.isNotEmpty)
+                                        Text(doc.specialization),
+                                      if (doc.fullAddress.isNotEmpty)
+                                        Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.location_on,
+                                              size: 12,
+                                              color: Colors.grey,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Expanded(
+                                              child: Text(
+                                                doc.fullAddress,
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.grey.shade600,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                    ],
+                                  ),
+                                  trailing: const Icon(
+                                    Icons.check_circle_outline,
+                                    color: Colors.green,
+                                  ),
+                                  onTap: () {
+                                    Navigator.pop(context);
+                                    // Navigate to form with existing doctor
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => DoctorReferralForm(
+                                          tripId: _trip.id,
+                                          existingDoctor: doc,
+                                        ),
+                                      ),
+                                    ).then((refresh) {
+                                      if (refresh == true) {
+                                        _refreshTrip();
+                                      }
+                                    });
+                                  },
+                                );
+                              },
+                            ),
                     ),
-                    onTap: () {
-                      Navigator.pop(context);
-                      // Navigate to form with existing doctor
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => DoctorReferralForm(
-                            tripId: _trip.id,
-                            existingDoctor: doc,
-                          ),
-                        ),
-                      ).then((refresh) {
-                        if (refresh == true) {
-                          _refreshTrip();
-                        }
-                      });
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
@@ -249,7 +382,10 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       context,
       MaterialPageRoute(builder: (_) => EndTripScreen(tripId: _trip.id)),
     ).then((result) {
-      if (result == true) {
+      if (result is Trip) {
+        if (mounted) {
+          setState(() => _trip = result);
+        }
         if (mounted) {
           Navigator.pop(context, true);
         }
@@ -278,6 +414,12 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _queueSubscription?.cancel();
+    super.dispose();
   }
 
   @override
@@ -396,6 +538,23 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
                     ),
                   ],
                 ),
+                if (_hasQueuedSync)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.sync, size: 16, color: Colors.orange),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Queued for sync',
+                          style: TextStyle(
+                            color: Colors.orange.shade800,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 if (_trip.additionalExpenses != null &&
                         _trip.additionalExpenses!.isNotEmpty ||
                     _trip.totalKilometers > 0) ...[
