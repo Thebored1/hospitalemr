@@ -43,3 +43,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Large archives and temp files
+*.zip
+*.txt
+*.db
+api_service_old.dart
+fix_html.py
+
+# Backend (has its own separate repo)
+/backend/
