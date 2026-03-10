@@ -6,6 +6,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'log_service.dart';
 import '../models/task.dart';
 import '../models/doctor.dart';
 import '../models/patient_referral.dart';
@@ -42,6 +43,7 @@ class ApiService {
   static bool get isAuthenticated => _authToken != null;
   static String? get userRole => _userRole;
   static String? get username => _username;
+  static String? get authToken => _authToken;
 
   static final StreamController<String> _errorController =
       StreamController<String>.broadcast();
@@ -144,11 +146,33 @@ class ApiService {
         _username = data['username'] ?? username;
         _userRole = data['role']; // Role now comes from the API!
         await _saveSession();
+        LogService.log(
+          'INFO',
+          'Login success',
+          logger: 'auth',
+          context: {'username': _username, 'role': _userRole},
+        );
         return true;
       }
+      LogService.log(
+        'WARN',
+        'Login failed',
+        logger: 'auth',
+        context: {
+          'username': username,
+          'status': response.statusCode,
+          'body': response.body,
+        },
+      );
       return false;
     } catch (e) {
       print('Login Error: $e');
+      LogService.log(
+        'ERROR',
+        'Login error',
+        logger: 'auth',
+        context: {'username': username, 'error': e.toString()},
+      );
       return false;
     }
   }
@@ -730,13 +754,34 @@ class ApiService {
       if (response.statusCode == 200) {
         return Trip.fromJson(json.decode(response.body));
       } else {
-        _reportError(
-          'Failed to end trip (${response.statusCode}). Please try again.',
+        if (!isSync) {
+          _reportError(
+            'Failed to end trip (${response.statusCode}). Please try again.',
+          );
+        }
+        LogService.log(
+          'ERROR',
+          'End trip failed',
+          logger: 'trip',
+          context: {
+            'tripId': tripId,
+            'status': response.statusCode,
+            'body': response.body,
+            'isSync': isSync,
+          },
         );
       }
     } catch (e) {
       print('End Trip Error: $e');
-      _reportError('End Trip Error: $e');
+      if (!isSync) {
+        _reportError('End Trip Error: $e');
+      }
+      LogService.log(
+        'ERROR',
+        'End trip error',
+        logger: 'trip',
+        context: {'tripId': tripId, 'error': e.toString(), 'isSync': isSync},
+      );
       if (!isSync) {
         return _queueEndTripOffline(
           tripId,
@@ -908,7 +953,15 @@ class ApiService {
       return response.statusCode == 201;
       } catch (e) {
         print('Add Overnight Stay Error: $e');
-        _reportError('Add Overnight Stay Error: $e');
+        if (!isSync) {
+          _reportError('Add Overnight Stay Error: $e');
+        }
+        LogService.log(
+          'ERROR',
+          'Overnight stay error',
+          logger: 'overnight_stay',
+          context: {'tripId': tripId, 'error': e.toString(), 'isSync': isSync},
+        );
         if (!isSync) {
           return _queueAddOvernightStay(
             tripId,
@@ -1027,9 +1080,15 @@ class ApiService {
   }) async {
     if (_authToken == null) return false;
     if (imagePath == null || imagePath.trim().isEmpty) {
-      if (isSync) {
+      if (!isSync) {
         _reportError('Cannot sync doctor visit: missing visit image.');
       }
+      LogService.log(
+        'WARN',
+        'Doctor visit missing image',
+        logger: 'doctor_visit',
+        context: {'tripId': tripId, 'isSync': isSync},
+      );
       return false;
     }
 
@@ -1046,7 +1105,15 @@ class ApiService {
 
     try {
       if (!File(imagePath).existsSync()) {
-        _reportError('Cannot sync doctor visit: image file not found.');
+        if (!isSync) {
+          _reportError('Cannot sync doctor visit: image file not found.');
+        }
+        LogService.log(
+          'ERROR',
+          'Doctor visit image file not found',
+          logger: 'doctor_visit',
+          context: {'tripId': tripId, 'path': imagePath, 'isSync': isSync},
+        );
         return false;
       }
       var request = http.MultipartRequest(
@@ -1092,8 +1159,21 @@ class ApiService {
       } else {
         print('Create Doctor Referral Failed: ${response.statusCode}');
         print('Body: ${response.body}');
-        _reportError(
-          'Failed to sync doctor visit (${response.statusCode}).',
+        if (!isSync) {
+          _reportError(
+            'Failed to sync doctor visit (${response.statusCode}).',
+          );
+        }
+        LogService.log(
+          'ERROR',
+          'Doctor visit sync failed',
+          logger: 'doctor_visit',
+          context: {
+            'tripId': tripId,
+            'status': response.statusCode,
+            'body': response.body,
+            'isSync': isSync,
+          },
         );
         if (!isSync) {
           // Server rejected — queue for later retry rather than silently dropping
@@ -1103,7 +1183,15 @@ class ApiService {
       }
     } catch (e) {
       print('Create Doctor Referral Error: $e');
-      _reportError('Failed to sync doctor visit: $e');
+      if (!isSync) {
+        _reportError('Failed to sync doctor visit: $e');
+      }
+      LogService.log(
+        'ERROR',
+        'Doctor visit sync error',
+        logger: 'doctor_visit',
+        context: {'tripId': tripId, 'error': e.toString(), 'isSync': isSync},
+      );
       if (!isSync) {
         return _queueCreateDoctorReferral(
           referral,
@@ -1435,14 +1523,41 @@ class ApiService {
       } else {
         print('Mark Doctor Visited Failed: ${response.statusCode}');
         print('Body: ${response.body}');
-        _reportError(
-          'Failed to mark doctor as visited (${response.statusCode}).',
+        if (!isSync) {
+          _reportError(
+            'Failed to mark doctor as visited (${response.statusCode}).',
+          );
+        }
+        LogService.log(
+          'ERROR',
+          'Mark doctor visited failed',
+          logger: 'doctor_visit',
+          context: {
+            'doctorId': doctorId,
+            'tripId': tripId,
+            'status': response.statusCode,
+            'body': response.body,
+            'isSync': isSync,
+          },
         );
         return false;
       }
     } catch (e) {
       print('Mark Doctor Visited Error: $e');
-      _reportError('Mark Doctor Visited Error: $e');
+      if (!isSync) {
+        _reportError('Mark Doctor Visited Error: $e');
+      }
+      LogService.log(
+        'ERROR',
+        'Mark doctor visited error',
+        logger: 'doctor_visit',
+        context: {
+          'doctorId': doctorId,
+          'tripId': tripId,
+          'error': e.toString(),
+          'isSync': isSync,
+        },
+      );
       if (!isSync) {
         return _queueMarkDoctorVisited(doctorId, tripId);
       }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,7 @@ import 'screens/login_screen.dart';
 import 'widgets/role_switcher.dart';
 import 'services/api_service.dart';
 import 'services/sync_service.dart';
+import 'services/log_service.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
@@ -31,6 +33,31 @@ void main() async {
   // Initialize SyncService singleton so its connectivity listener is registered.
   // This is what triggers syncPendingData() when the device regains network.
   SyncService();
+  LogService.configure(
+    baseUrl: ApiService.baseUrl,
+    tokenProvider: () => ApiService.authToken,
+  );
+
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    LogService.log(
+      'ERROR',
+      details.exceptionAsString(),
+      logger: 'flutter',
+      context: {
+        'stack': details.stack?.toString(),
+      },
+    );
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    LogService.log(
+      'ERROR',
+      error.toString(),
+      logger: 'dart',
+      context: {'stack': stack.toString()},
+    );
+    return true;
+  };
 
   runApp(const StaffApp());
 }

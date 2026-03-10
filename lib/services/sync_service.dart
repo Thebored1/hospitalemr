@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/patient_referral.dart';
 import '../models/doctor.dart';
 import 'api_service.dart';
 import 'database_helper.dart';
+import 'log_service.dart';
 
 class SyncService {
   static final SyncService _instance = SyncService._internal();
@@ -30,7 +32,7 @@ class SyncService {
   }
 
   /// Pushes all local queued actions to the server
-  Future<void> syncPendingData() async {
+  Future<void> syncPendingData({bool showErrors = false}) async {
     if (_isSyncing) return;
     _isSyncing = true;
     try {
@@ -41,6 +43,12 @@ class SyncService {
         return;
       }
       print('Syncing ${queue.length} pending items to server...');
+      LogService.log(
+        'INFO',
+        'Sync started',
+        logger: 'sync',
+        context: {'queueSize': queue.length},
+      );
 
       bool anySuccess = false;
       bool anyFailure = false;
@@ -261,13 +269,76 @@ class SyncService {
         }
       }
 
-      if (anyFailure) {
+      if (anyFailure && showErrors) {
         ApiService.reportError(
           'Some items failed to sync. Please check your connection and try again.',
         );
       }
+      if (anySuccess || anyFailure) {
+        LogService.log(
+          'INFO',
+          'Sync finished',
+          logger: 'sync',
+          context: {'anySuccess': anySuccess, 'anyFailure': anyFailure},
+        );
+      }
+      await _cleanupInvalidQueueItems();
     } finally {
       _isSyncing = false;
+    }
+  }
+
+  Future<void> _cleanupInvalidQueueItems() async {
+    final dbHelper = DatabaseHelper();
+    final queue = await dbHelper.getSyncQueue();
+    if (queue.isEmpty) return;
+
+    bool removedAny = false;
+    int removedCount = 0;
+    for (final item in queue) {
+      final action = item['action'];
+      final payload = item['payload'] as Map<String, dynamic>;
+      final queueId = item['id'] as int;
+
+      String? filePath;
+      if (action == 'START_TRIP') {
+        filePath = payload['odometerStartPath']?.toString();
+      } else if (action == 'END_TRIP') {
+        filePath = payload['odometerEndPath']?.toString();
+      } else if (action == 'CREATE_DOCTOR_REFERRAL') {
+        filePath = payload['imagePath']?.toString();
+      } else if (action == 'UPDATE_DOCTOR_REFERRAL') {
+        filePath = payload['imagePath']?.toString();
+      } else if (action == 'ADD_OVERNIGHT_STAY') {
+        filePath = payload['billPath']?.toString();
+      } else {
+        continue;
+      }
+
+      if (filePath == null || filePath.trim().isEmpty) {
+        if (action == 'CREATE_DOCTOR_REFERRAL' || action == 'ADD_OVERNIGHT_STAY') {
+          await dbHelper.deleteSyncQueueItem(queueId);
+          removedAny = true;
+          removedCount += 1;
+        }
+        continue;
+      }
+
+      if (!File(filePath).existsSync()) {
+        await dbHelper.deleteSyncQueueItem(queueId);
+        removedAny = true;
+        removedCount += 1;
+      }
+    }
+
+    if (removedAny) {
+      ApiService.notifyQueueUpdated();
+      LogService.log(
+        'WARN',
+        'Removed invalid queued sync items',
+        logger: 'sync',
+        context: {'removedCount': removedCount},
+      );
     }
   }
 
