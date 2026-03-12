@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/patient_referral.dart';
 import '../models/doctor.dart';
+import '../models/trip.dart';
 import 'api_service.dart';
 import 'database_helper.dart';
 import 'log_service.dart';
@@ -52,6 +53,7 @@ class SyncService {
 
       bool anySuccess = false;
       bool anyFailure = false;
+      final startedWithQueue = queue.isNotEmpty;
 
       for (final item in queue) {
         final action = item['action'];
@@ -255,17 +257,17 @@ class SyncService {
         }
       }
 
-      // If we synced anything, force a background refresh to replace optimistic fake IDs
-      // with the real data from the server.
-      if (anySuccess) {
-        print("Sync complete. Refreshing local caches with real data...");
+      // Always reconcile after a sync run so we can clear stale queued flags
+      // (e.g. END_TRIP already completed on the server).
+      if (startedWithQueue) {
         try {
           await ApiService.fetchTrips();
-          await ApiService.fetchDoctorReferrals();
-          // Also fire off an event or let the UI know if needed,
-          // but the next time the screen builds or pulls to refresh, it will use real data.
+          if (anySuccess) {
+            await ApiService.fetchDoctorReferrals();
+          }
+          await _reconcileQueueWithServer();
         } catch (e) {
-          print('Error refreshing caches after sync: $e');
+          print('Error reconciling caches after sync: $e');
         }
       }
 
@@ -285,6 +287,104 @@ class SyncService {
       await _cleanupInvalidQueueItems();
     } finally {
       _isSyncing = false;
+    }
+  }
+
+  Future<void> _reconcileQueueWithServer() async {
+    // Best-effort: if server already has the effect of a queued action (often
+    // due to retries/duplicates), drop the local queue item so UI doesn't show
+    // "Queued for sync" forever.
+    final dbHelper = DatabaseHelper();
+    final queue = await dbHelper.getSyncQueue();
+    if (queue.isEmpty) return;
+
+    final tripIds = <int>{};
+    for (final item in queue) {
+      final payload = item['payload'] as Map<String, dynamic>;
+      final tripId = int.tryParse(payload['tripId']?.toString() ?? '') ??
+          int.tryParse(payload['trip_id']?.toString() ?? '') ??
+          int.tryParse((payload['data'] is Map ? payload['data']['trip']?.toString() : '') ?? '');
+      if (tripId != null && tripId > 0) {
+        tripIds.add(tripId);
+      }
+    }
+    if (tripIds.isEmpty) return;
+
+    final tripsById = <int, Trip>{};
+    for (final id in tripIds) {
+      final trip = await ApiService.fetchTripById(id);
+      if (trip != null) {
+        tripsById[id] = trip;
+      }
+    }
+
+    int removed = 0;
+    for (final item in queue) {
+      final action = item['action']?.toString() ?? '';
+      final payload = item['payload'] as Map<String, dynamic>;
+      final queueId = item['id'] as int;
+
+      final tripId = int.tryParse(payload['tripId']?.toString() ?? '') ??
+          int.tryParse(payload['trip_id']?.toString() ?? '') ??
+          int.tryParse((payload['data'] is Map ? payload['data']['trip']?.toString() : '') ?? '');
+      if (tripId == null) continue;
+      final trip = tripsById[tripId];
+      if (trip == null) continue;
+
+      bool alreadyApplied = false;
+      if (action == 'END_TRIP') {
+        alreadyApplied = trip.status == 'COMPLETED';
+      } else if (action == 'MARK_DOCTOR_VISITED') {
+        final doctorId = int.tryParse(payload['doctorId']?.toString() ?? '');
+        if (doctorId != null) {
+          alreadyApplied = trip.doctorReferrals.any((d) => d.id == doctorId);
+        }
+      } else if (action == 'CREATE_DOCTOR_REFERRAL') {
+        final ref = payload['referral'];
+        final name = (ref is Map ? (ref['name'] ?? '') : '').toString().trim().toLowerCase();
+        if (name.isNotEmpty) {
+          alreadyApplied = trip.doctorReferrals.any(
+            (d) => d.name.trim().toLowerCase() == name,
+          );
+        }
+      } else if (action == 'UPDATE_DOCTOR_REFERRAL') {
+        final id = int.tryParse(payload['id']?.toString() ?? '');
+        final data = payload['data'];
+        final name = (data is Map ? (data['name'] ?? '') : '').toString().trim().toLowerCase();
+        if (id != null) {
+          alreadyApplied = trip.doctorReferrals.any((d) => d.id == id);
+        }
+        if (!alreadyApplied && name.isNotEmpty) {
+          alreadyApplied = trip.doctorReferrals.any(
+            (d) => d.name.trim().toLowerCase() == name,
+          );
+        }
+      } else if (action == 'ADD_OVERNIGHT_STAY') {
+        final name = (payload['name'] ?? '').toString().trim().toLowerCase();
+        final address = (payload['address'] ?? '').toString().trim().toLowerCase();
+        if (name.isNotEmpty && address.isNotEmpty) {
+          alreadyApplied = trip.overnightStays.any(
+            (s) =>
+                s.hotelName.trim().toLowerCase() == name &&
+                s.hotelAddress.trim().toLowerCase() == address,
+          );
+        }
+      }
+
+      if (alreadyApplied) {
+        await dbHelper.deleteSyncQueueItem(queueId);
+        removed += 1;
+      }
+    }
+
+    if (removed > 0) {
+      ApiService.notifyQueueUpdated();
+      LogService.log(
+        'WARN',
+        'Reconciled and removed stale queue items',
+        logger: 'sync',
+        context: {'removedCount': removed},
+      );
     }
   }
 

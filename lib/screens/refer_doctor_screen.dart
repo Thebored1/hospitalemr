@@ -47,6 +47,25 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
   // final ImagePicker _picker = ImagePicker(); -- removed for CameraService
   XFile? _visitImage;
   bool _hasExistingVisitImage = false;
+  String? _existingVisitImagePathOrUrl;
+  static const String _draftMarker = '<<DRAFT>>';
+
+  static bool _hasDraftMarker(String text) {
+    return text.contains(_draftMarker);
+  }
+
+  static String _stripDraftMarker(String text) {
+    if (text.isEmpty) return text;
+    final stripped = text.replaceAll(_draftMarker, '').trimRight();
+    return stripped;
+  }
+
+  static String _applyDraftMarker(String text) {
+    if (_hasDraftMarker(text)) return text;
+    final trimmed = text.trimRight();
+    if (trimmed.isEmpty) return _draftMarker;
+    return '$trimmed\n\n$_draftMarker';
+  }
 
   @override
   void initState() {
@@ -69,6 +88,9 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
       _hasExistingVisitImage =
           isEditingCurrentTripVisit &&
           (widget.existingDoctor!.visitImage?.trim().isNotEmpty ?? false);
+      if (_hasExistingVisitImage) {
+        _existingVisitImagePathOrUrl = widget.existingDoctor!.visitImage;
+      }
       _selectedDoctor = widget.existingDoctor;
     }
     _loadAllDoctors();
@@ -174,7 +196,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         : null;
     _emailController.text = doc.email ?? '';
     _remarksController.text = doc.remarks ?? '';
-    _detailsController.text = doc.additionalDetails;
+    _detailsController.text = _stripDraftMarker(doc.additionalDetails);
   }
 
   @override
@@ -191,6 +213,18 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
   }
 
   Future<void> _pickImage() async {
+    // One-time image capture per entry: once set (or loaded from an existing
+    // draft), we don't allow retakes.
+    if (_visitImage != null || _hasExistingVisitImage) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Visit photo already captured for this entry.'),
+        ),
+      );
+      return;
+    }
+
     // Check location first
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
@@ -220,8 +254,49 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
       setState(() {
         _visitImage = image;
         _hasExistingVisitImage = true;
+        _existingVisitImagePathOrUrl = image.path;
       });
     }
+  }
+
+  String? _resolveVisitImageForDisplay(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+
+    if (trimmed.startsWith('file://')) {
+      final path = trimmed.substring('file://'.length);
+      return File(path).existsSync() ? path : null;
+    }
+
+    if (File(trimmed).existsSync()) {
+      return trimmed;
+    }
+
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+
+    // Backend often returns relative media paths; convert to absolute.
+    final base = ApiService.baseUrl.replaceFirst(RegExp(r'/api/?$'), '');
+    if (trimmed.startsWith('/')) {
+      return '$base$trimmed';
+    }
+    return '$base/$trimmed';
+  }
+
+  String? _existingLocalVisitImagePath() {
+    final raw = _existingVisitImagePathOrUrl;
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+
+    if (trimmed.startsWith('file://')) {
+      final path = trimmed.substring('file://'.length);
+      return File(path).existsSync() ? path : null;
+    }
+
+    return File(trimmed).existsSync() ? trimmed : null;
   }
 
   void _onDoctorSelected(DoctorReferral? doctor) {
@@ -231,6 +306,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         _visitImage =
             null; // Reset image only when switching doctor on New referral
         _hasExistingVisitImage = false;
+        _existingVisitImagePathOrUrl = null;
       });
       // The user wants all fields EXCEPT contact number to be auto-filled if the doctor exists.
       // And Area should NOT be editable.
@@ -241,7 +317,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     }
   }
 
-  Future<void> _submitReferral() async {
+  Future<void> _submitReferral({bool saveDraft = false}) async {
     // Validate doctor selection
     if (_selectedDoctor == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -271,12 +347,22 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         _pinController.text.trim().isNotEmpty &&
         hasVisitImage;
 
-    if (!isComplete) {
-      // Show confirmation dialog before saving partially
+    if (!saveDraft && !isComplete) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Please fill all mandatory fields to complete the visit.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (saveDraft && !isComplete) {
       final proceed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Save Partial Entry?'),
+          title: const Text('Save Draft?'),
           content: const Text(
             'Some mandatory fields are missing. '
             'You can save this as an incomplete draft, but you must complete it before ending the trip.',
@@ -309,7 +395,10 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
     final city = _cityController.text.trim();
     final pin = _pinController.text.trim();
     final remarks = _remarksController.text.trim();
-    final details = _detailsController.text.trim();
+    final rawDetails = _detailsController.text;
+    final details = saveDraft
+        ? _applyDraftMarker(rawDetails)
+        : _stripDraftMarker(rawDetails).trim();
 
     // Capture Location
     Position? position;
@@ -347,6 +436,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         'remarks': remarks,
         'additional_details': details,
         'status': 'Referred',
+        // Draft is tracked client-side by embedding a marker in additional_details.
         // If location was captured, update it. If not, it means the user saved partial without triggering location?
         if (position != null) 'visit_lat': position.latitude.toString(),
         if (position != null) 'visit_long': position.longitude.toString(),
@@ -354,7 +444,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
         // Wait, if we cleared the image, _visitImage is null.
         // In ApiService, imagePath: null means it ignores updating the image, it does NOT clear it.
         // That's fine for now. We mostly care about new records not taking old images.
-      }, imagePath: _visitImage?.path);
+      }, imagePath: _visitImage?.path ?? _existingLocalVisitImagePath());
     } else {
       // Create new referral (New entry OR Repeat Visit)
       final referral = DoctorReferral(
@@ -392,7 +482,7 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
           content: Text(
             isComplete
                 ? 'Doctor visit completed successfully'
-                : 'Doctor partial draft saved successfully',
+                : 'Doctor draft saved successfully',
           ),
         ),
       );
@@ -656,7 +746,9 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                   ),
                   const SizedBox(height: 8),
                   GestureDetector(
-                    onTap: _pickImage,
+                    onTap: (_visitImage != null || _hasExistingVisitImage)
+                        ? null
+                        : _pickImage,
                     child: Container(
                       height: 150,
                       width: double.infinity,
@@ -681,27 +773,68 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                               ),
                             )
                           : _hasExistingVisitImage
-                          ? Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: const [
-                                Icon(
-                                  Icons.check_circle,
-                                  size: 36,
-                                  color: Colors.green,
-                                ),
-                                SizedBox(height: 8),
-                                Text(
-                                  "Existing visit photo attached",
-                                  style: TextStyle(color: Colors.grey),
-                                ),
-                                SizedBox(height: 4),
-                                Text(
-                                  "Tap to retake photo",
-                                  style: TextStyle(color: Colors.grey),
-                                ),
-                              ],
-                            )
-                          : Column(
+                              ? ClipRRect(
+                                  borderRadius: BorderRadius.circular(15),
+                                  child: Builder(
+                                    builder: (_) {
+                                      final resolved =
+                                          _resolveVisitImageForDisplay(
+                                        _existingVisitImagePathOrUrl,
+                                      );
+                                      if (resolved == null) {
+                                        return Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: const [
+                                            Icon(
+                                              Icons.check_circle,
+                                              size: 36,
+                                              color: Colors.green,
+                                            ),
+                                            SizedBox(height: 8),
+                                            Text(
+                                              "Visit photo attached",
+                                              style:
+                                                  TextStyle(color: Colors.grey),
+                                            ),
+                                          ],
+                                        );
+                                      }
+                                      if (File(resolved).existsSync()) {
+                                        return Image.file(
+                                          File(resolved),
+                                          fit: BoxFit.cover,
+                                        );
+                                      }
+                                      return Image.network(
+                                        resolved,
+                                        fit: BoxFit.cover,
+                                        errorBuilder:
+                                            (context, error, stackTrace) {
+                                          return Column(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.center,
+                                            children: const [
+                                              Icon(
+                                                Icons.check_circle,
+                                                size: 36,
+                                                color: Colors.green,
+                                              ),
+                                              SizedBox(height: 8),
+                                              Text(
+                                                "Visit photo attached",
+                                                style: TextStyle(
+                                                  color: Colors.grey,
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      );
+                                    },
+                                  ),
+                                )
+                              : Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: const [
                                 Icon(
@@ -721,56 +854,78 @@ class _DoctorReferralFormState extends State<DoctorReferralForm> {
                 ],
               ),
             ),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isLoading ? null : _submitReferral,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.black,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30),
-                  ),
-                ),
-                child: _isLoading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : Builder(
-                        builder: (context) {
-                          final hasVisitImage =
-                              _visitImage != null || _hasExistingVisitImage;
-                          bool isComplete =
-                              _contactController.text.trim().isNotEmpty &&
-                              (_selectedSpecialization?.trim().isNotEmpty ??
-                                  false) &&
-                              (_selectedQualification?.trim().isNotEmpty ??
-                                  false) &&
-                              _areaController.text.trim().isNotEmpty &&
-                              _pinController.text.trim().isNotEmpty &&
-                              hasVisitImage;
-                          if (!hasVisitImage) {
-                            return const Text(
-                              "Add Visit Photo to Continue",
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
+            Builder(
+              builder: (context) {
+                final hasVisitImage = _visitImage != null || _hasExistingVisitImage;
+                final canSaveDraft = hasVisitImage && _selectedDoctor != null;
+                final isComplete =
+                    _contactController.text.trim().isNotEmpty &&
+                    (_selectedSpecialization?.trim().isNotEmpty ?? false) &&
+                    (_selectedQualification?.trim().isNotEmpty ?? false) &&
+                    _areaController.text.trim().isNotEmpty &&
+                    _pinController.text.trim().isNotEmpty &&
+                    hasVisitImage;
+
+                return Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: (_isLoading || !canSaveDraft)
+                            ? null
+                            : () => _submitReferral(saveDraft: true),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(30),
+                          ),
+                          side: BorderSide(color: Colors.grey.shade400),
+                        ),
+                        child: _isLoading
+                            ? const SizedBox(
+                                height: 18,
+                                width: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text(
+                                "Save Draft",
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
-                            );
-                          }
-                          return Text(
-                            isComplete
-                                ? (widget.existingDoctor != null
-                                      ? "Complete Doctor Visit"
-                                      : "Submit Referral")
-                                : "Save Partial Draft",
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          );
-                        },
                       ),
-              ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: (_isLoading || !isComplete)
+                            ? null
+                            : () => _submitReferral(saveDraft: false),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.black,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(30),
+                          ),
+                        ),
+                        child: _isLoading
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : Text(
+                                widget.existingDoctor != null
+                                    ? "Complete Visit"
+                                    : "Submit Referral",
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ),

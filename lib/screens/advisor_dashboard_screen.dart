@@ -29,7 +29,6 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
   List<PatientReferral> _patients = [];
   List<Trip> _trips = [];
   List<DoctorReferral> _assignedDoctors = []; // Doctors assigned by admin
-  Set<String> _visitedDoctorNames = {};
   bool _isLoading = true;
   TabController? _tabController;
   String _searchQuery = '';
@@ -66,15 +65,6 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
                 queuedMapRaw[trip.id] ?? [],
               ))
           .toList();
-      final visitedNames = <String>{};
-      for (final trip in processedTrips) {
-        for (final doc in trip.doctorReferrals) {
-          final nameKey = doc.name.trim().toLowerCase();
-          if (nameKey.isNotEmpty) {
-            visitedNames.add(nameKey);
-          }
-        }
-      }
       final queuedMap = <int, bool>{};
       queuedMapRaw.forEach((key, value) {
         queuedMap[key] = value.isNotEmpty;
@@ -85,7 +75,6 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
           _patients = patients;
           _trips = processedTrips;
           _assignedDoctors = doctors;
-          _visitedDoctorNames = visitedNames;
           _queuedTripMap = queuedMap;
           _isLoading = false;
         });
@@ -140,11 +129,11 @@ class _AdvisorDashboardScreenState extends State<AdvisorDashboardScreen>
     final seen = <String>{};
     return _assignedDoctors
     // Backend already filters by current assignment + visited/disabled state.
-    // Do not rely on global doctor.status here.
+    // Do not rely on client-side "visited history" across trips here; that
+    // hides legitimately re-assigned doctors.
     .where((doc) {
       final key = doc.name.trim().toLowerCase();
       return key.isNotEmpty &&
-          !_visitedDoctorNames.contains(key) &&
           seen.add(key);
     }) // First occurrence (Newest) wins
     .toList();

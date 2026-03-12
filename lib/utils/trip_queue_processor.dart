@@ -55,7 +55,7 @@ class TripQueueProcessor {
     final mergedDoctors = [
       for (final doc in updatedTrip.doctorReferrals)
         if (doc.id != null && updatesById.containsKey(doc.id))
-          updatesById[doc.id!]!
+          _mergeDoctorReferral(doc, updatesById[doc.id!]!)
         else
           doc,
       ...newDoctors,
@@ -70,6 +70,52 @@ class TripQueueProcessor {
       doctorReferrals: mergedDoctors,
       overnightStays: mergedStays,
       status: queuedEndTrip ? 'COMPLETED' : updatedTrip.status,
+    );
+  }
+
+  static DoctorReferral _mergeDoctorReferral(
+    DoctorReferral base,
+    DoctorReferral update,
+  ) {
+    String pickRequired(String updated, String original) =>
+        updated.trim().isNotEmpty ? updated : original;
+
+    String? pickOptional(String? updated, String? original) {
+      if (updated == null) return original;
+      // Allow explicit clears only when a non-null value is provided; keep original otherwise.
+      return updated;
+    }
+
+    String? pickImage(String? updated, String? original) {
+      final updatedVal = updated?.trim() ?? '';
+      if (updatedVal.isNotEmpty) return updatedVal;
+      final originalVal = original?.trim() ?? '';
+      return originalVal.isNotEmpty ? originalVal : null;
+    }
+
+    return DoctorReferral(
+      id: base.id,
+      tripId: base.tripId,
+      name: pickRequired(update.name, base.name),
+      contactNumber: pickRequired(update.contactNumber, base.contactNumber),
+      area: pickRequired(update.area, base.area),
+      street: pickOptional(update.street, base.street),
+      city: pickOptional(update.city, base.city),
+      pin: pickRequired(update.pin, base.pin),
+      specialization: pickRequired(update.specialization, base.specialization),
+      degreeQualification:
+          pickRequired(update.degreeQualification, base.degreeQualification),
+      email: pickOptional(update.email, base.email),
+      remarks: pickOptional(update.remarks, base.remarks),
+      additionalDetails:
+          pickRequired(update.additionalDetails, base.additionalDetails),
+      additionalExpenses: pickOptional(update.additionalExpenses, base.additionalExpenses),
+      visitImage: pickImage(update.visitImage, base.visitImage),
+      visitLat: update.visitLat ?? base.visitLat,
+      visitLong: update.visitLong ?? base.visitLong,
+      createdAt: base.createdAt,
+      status: pickRequired(update.status, base.status),
+      isInternal: update.isInternal,
     );
   }
 

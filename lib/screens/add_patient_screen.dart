@@ -105,6 +105,168 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
     }
   }
 
+  Future<void> _showDoctorPicker({
+    required String title,
+    required List<DoctorReferral> doctors,
+    required DoctorReferral? selectedDoctor,
+    required ValueChanged<DoctorReferral?> onSelected,
+  }) async {
+    if (_loadingDoctors) return;
+
+    final searchController = TextEditingController();
+    List<DoctorReferral> filtered = List.from(doctors);
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          void applyFilter(String query) {
+            final q = query.trim().toLowerCase();
+            if (q.isEmpty) {
+              filtered = List.from(doctors);
+            } else {
+              filtered = doctors.where((doc) {
+                final name = doc.name.toLowerCase();
+                final spec = doc.specialization.toLowerCase();
+                final address = doc.fullAddress.toLowerCase();
+                return name.contains(q) ||
+                    spec.contains(q) ||
+                    address.contains(q);
+              }).toList();
+            }
+            setModalState(() {});
+          }
+
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 12),
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.search, color: Colors.black54),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      if (selectedDoctor != null)
+                        TextButton(
+                          onPressed: () {
+                            Navigator.pop(context);
+                            onSelected(null);
+                          },
+                          child: const Text('Clear'),
+                        ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TextField(
+                    controller: searchController,
+                    onChanged: applyFilter,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name, specialization, or area',
+                      prefixIcon: const Icon(Icons.search),
+                      filled: true,
+                      fillColor: Colors.grey.shade100,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return ListTile(
+                          title: const Text('— None —'),
+                          onTap: () {
+                            Navigator.pop(context);
+                            onSelected(null);
+                          },
+                        );
+                      }
+                      final doc = filtered[index - 1];
+                      return ListTile(
+                        title: Text(
+                          doc.name,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (doc.specialization.isNotEmpty)
+                              Text(doc.specialization),
+                            if (doc.fullAddress.isNotEmpty)
+                              Text(
+                                doc.fullAddress,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                          ],
+                        ),
+                        trailing: selectedDoctor?.id == doc.id
+                            ? const Icon(Icons.check, color: Colors.green)
+                            : null,
+                        onTap: () {
+                          Navigator.pop(context);
+                          onSelected(doc);
+                        },
+                      );
+                    },
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemCount: filtered.length + 1,
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildDoctorSearchDropdown({
     required String hint,
     required List<DoctorReferral> doctors,
@@ -136,69 +298,42 @@ class _AddPatientScreenState extends State<AddPatientScreen> {
                 ],
               ),
             )
-          : DropdownButtonHideUnderline(
-              child: DropdownButton<DoctorReferral>(
-                value: selectedDoctor,
-                isExpanded: true,
-                hint: Row(
+          : InkWell(
+              borderRadius: BorderRadius.circular(30),
+              onTap: () => _showDoctorPicker(
+                title: hint,
+                doctors: doctors,
+                selectedDoctor: selectedDoctor,
+                onSelected: onSelected,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Row(
                   children: [
                     Icon(icon, size: 18, color: Colors.grey),
                     const SizedBox(width: 8),
-                    Text(hint, style: const TextStyle(color: Colors.grey)),
+                    Expanded(
+                      child: Text(
+                        selectedDoctor?.name ?? hint,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: selectedDoctor == null
+                              ? Colors.grey
+                              : Colors.black,
+                        ),
+                      ),
+                    ),
+                    if (selectedDoctor != null)
+                      GestureDetector(
+                        onTap: () => onSelected(null),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8),
+                          child: Icon(Icons.clear, size: 16, color: Colors.grey),
+                        ),
+                      ),
+                    const Icon(Icons.expand_more),
                   ],
                 ),
-                icon: const Icon(Icons.expand_more),
-                dropdownColor: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                items: [
-                  const DropdownMenuItem<DoctorReferral>(
-                    value: null,
-                    child: Text(
-                      '— None —',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  ),
-                  ...doctors.map(
-                    (doc) => DropdownMenuItem<DoctorReferral>(
-                      value: doc,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            doc.name,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                            ),
-                          ),
-                          if (doc.specialization.isNotEmpty)
-                            Text(
-                              doc.specialization,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-                onChanged: onSelected,
-                selectedItemBuilder: (context) => [
-                  const SizedBox.shrink(),
-                  ...doctors.map(
-                    (doc) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        doc.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                  ),
-                ],
               ),
             ),
     );

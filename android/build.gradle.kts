@@ -19,6 +19,17 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+subprojects {
+    plugins.withId("com.android.library") {
+        if (name == "connectivity_plus") {
+            dependencies {
+                add("implementation", "androidx.core:core:1.13.1")
+                add("implementation", "androidx.appcompat:appcompat:1.7.0")
+            }
+        }
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }

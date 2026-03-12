@@ -273,6 +273,38 @@ class DatabaseHelper {
     }
   }
 
+  Future<int> deleteQueuedActionsForTrip(
+    int tripId, {
+    String? action,
+  }) async {
+    final db = await database;
+    final rows = await db.query('sync_queue');
+    final idsToDelete = <int>[];
+
+    for (final row in rows) {
+      if (action != null && row['action'] != action) continue;
+      final payload = jsonDecode(row['payload'] as String) as Map<String, dynamic>;
+      if (_payloadReferencesTrip(payload, tripId)) {
+        final id = row['id'];
+        if (id is int) {
+          idsToDelete.add(id);
+        } else {
+          final parsed = int.tryParse(id?.toString() ?? '');
+          if (parsed != null) idsToDelete.add(parsed);
+        }
+      }
+    }
+
+    if (idsToDelete.isEmpty) return 0;
+
+    final batch = db.batch();
+    for (final id in idsToDelete) {
+      batch.delete('sync_queue', where: 'id = ?', whereArgs: [id]);
+    }
+    await batch.commit(noResult: true);
+    return idsToDelete.length;
+  }
+
   Future<bool> mergeQueuedDoctorReferralUpdate(
     int tempId,
     Map<String, dynamic> data, {

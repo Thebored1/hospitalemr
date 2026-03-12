@@ -913,14 +913,17 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
       }
     }
 
-    // For doctor timeline entries, show warning badge if incomplete
+    // For doctor timeline entries, show warning badge if incomplete or saved as draft.
     final bool incompleteEntry = isDoctor && _isIncomplete(item);
+    final bool draftEntry =
+        isDoctor && (item as DoctorReferral).additionalDetails.contains('<<DRAFT>>');
+    final bool needsAttention = incompleteEntry || draftEntry;
 
     return GestureDetector(
       onTap: () {
         if (isDoctor) {
           final doc = item as DoctorReferral;
-          if (incompleteEntry) {
+          if (needsAttention) {
             // Open edit form so the agent can complete the missing fields
             Navigator.push(
               context,
@@ -963,23 +966,23 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
                       height: 40,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: incompleteEntry
+                        color: needsAttention
                             ? Colors.orange.shade50
                             : Colors.white,
                         border: Border.all(
-                          color: incompleteEntry
+                          color: needsAttention
                               ? Colors.orange.shade400
                               : Colors.grey.shade300,
-                          width: incompleteEntry ? 2 : 1,
+                          width: needsAttention ? 2 : 1,
                         ),
                       ),
                       child: Icon(
                         icon,
                         size: 20,
-                        color: incompleteEntry ? Colors.orange : Colors.black,
+                        color: needsAttention ? Colors.orange : Colors.black,
                       ),
                     ),
-                    if (incompleteEntry)
+                    if (needsAttention)
                       Positioned(
                         top: -4,
                         right: -4,
@@ -1045,7 +1048,7 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
                       ],
                     ),
                     Text(subtitle, style: const TextStyle(color: Colors.grey)),
-                    if (incompleteEntry)
+                    if (needsAttention)
                       Padding(
                         padding: const EdgeInsets.only(top: 4, bottom: 2),
                         child: Row(
@@ -1057,7 +1060,9 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
                             ),
                             const SizedBox(width: 4),
                             Text(
-                              "Incomplete Draft - Tap to complete",
+                              incompleteEntry
+                                  ? "Incomplete Draft - Tap to complete"
+                                  : "Draft - Tap to edit",
                               style: TextStyle(
                                 color: Colors.orange.shade800,
                                 fontSize: 12,
