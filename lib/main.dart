@@ -106,22 +106,50 @@ class _StaffAppState extends State<StaffApp> {
         useMaterial3: true,
         fontFamily: 'Roboto',
       ),
-      home: FutureBuilder<bool>(
-        future: ApiService.loadSession(),
-        builder: (context, snapshot) {
-          // Show a loading indicator while checking session
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
-          }
-          // If session exists, go to RoleSwitcher; otherwise, LoginScreen
-          if (snapshot.data == true) {
-            return const RoleSwitcher();
-          }
-          return const LoginScreen();
-        },
-      ),
+      home: const AuthGate(),
     );
+  }
+}
+
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  bool? _isAuthenticated;
+  StreamSubscription<bool>? _authSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _authSubscription = ApiService.authStream.listen((isAuthed) {
+      if (!mounted) return;
+      setState(() => _isAuthenticated = isAuthed);
+    });
+    _init();
+  }
+
+  Future<void> _init() async {
+    final ok = await ApiService.loadAndValidateSession();
+    if (!mounted) return;
+    setState(() => _isAuthenticated = ok);
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final authed = _isAuthenticated;
+    if (authed == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    return authed ? const RoleSwitcher() : const LoginScreen();
   }
 }

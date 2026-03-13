@@ -22,6 +22,10 @@ class ApiService {
   static String? _userRole; // 'advisor', 'maintenance', 'admin'
   static String? _username;
 
+  static final StreamController<bool> _authController =
+      StreamController<bool>.broadcast();
+  static Stream<bool> get authStream => _authController.stream;
+
   static final StreamController<void> _queueUpdateController =
       StreamController<void>.broadcast();
   static Stream<void> get queueStream => _queueUpdateController.stream;
@@ -82,6 +86,82 @@ class ApiService {
     _userRole = null;
     _username = null;
     return false;
+  }
+
+  static bool _isAuthFailureStatus(int statusCode) {
+    return statusCode == 401 || statusCode == 403;
+  }
+
+  static Future<void> _handleAuthFailure(
+    String action,
+    http.Response response,
+  ) async {
+    try {
+      LogService.log(
+        'WARN',
+        'Auth failure',
+        logger: 'auth',
+        context: {
+          'action': action,
+          'status': response.statusCode,
+          'body': response.body,
+        },
+      );
+    } catch (_) {}
+
+    await logout();
+    _authController.add(false);
+    _reportError(
+      'Your session is no longer valid on the server. Please log in again.',
+    );
+  }
+
+  /// Loads the locally saved session and validates it against the server when online.
+  ///
+  /// If the server rejects the token (401/403), this clears the session so the UI
+  /// can return to the login screen. If offline, it keeps the session so the app
+  /// can continue with cached/offline data.
+  static Future<bool> loadAndValidateSession() async {
+    final hasSession = await loadSession();
+    if (!hasSession) {
+      _authController.add(false);
+      return false;
+    }
+    if (!(await _isOnline())) {
+      _authController.add(true);
+      return true;
+    }
+    final ok = await validateSession();
+    _authController.add(ok);
+    return ok;
+  }
+
+  /// Ping a lightweight authenticated endpoint to confirm token/user exists.
+  static Future<bool> validateSession() async {
+    if (_authToken == null || _authToken!.trim().isEmpty) return false;
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/trips/current/'),
+            headers: {
+              'Authorization': 'Token $_authToken',
+              'Content-Type': 'application/json',
+              'ngrok-skip-browser-warning': 'true',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('validate_session', response);
+        return false;
+      }
+
+      // 200 with JSON or "null" is fine; server errors shouldn't force logout.
+      return response.statusCode >= 200 && response.statusCode < 500;
+    } catch (_) {
+      // Network/server error shouldn't force logout.
+      return true;
+    }
   }
 
   static Future<void> _clearSession() async {
@@ -146,6 +226,7 @@ class ApiService {
         _username = data['username'] ?? username;
         _userRole = data['role']; // Role now comes from the API!
         await _saveSession();
+        _authController.add(true);
         LogService.log(
           'INFO',
           'Login success',
@@ -182,6 +263,7 @@ class ApiService {
     _userRole = null;
     _username = null;
     await _clearSession();
+    _authController.add(false);
   }
 
   // Role is now returned directly from the login API response
@@ -204,6 +286,10 @@ class ApiService {
           )
           .timeout(const Duration(seconds: 10));
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_all_doctors', response);
+        return [];
+      }
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
         final doctors = data
@@ -237,6 +323,10 @@ class ApiService {
           )
           .timeout(const Duration(seconds: 10));
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_specializations', response);
+        return [];
+      }
       if (response.statusCode == 200) {
         // Cache the raw JSON string
         await _cacheApiResponse('specializations', response.body);
@@ -277,6 +367,10 @@ class ApiService {
           )
           .timeout(const Duration(seconds: 10));
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_qualifications', response);
+        return [];
+      }
       if (response.statusCode == 200) {
         // Cache the raw JSON string
         await _cacheApiResponse('qualifications', response.body);
@@ -403,6 +497,10 @@ class ApiService {
         },
       );
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_current_trip', response);
+        return null;
+      }
       if (response.statusCode == 200) {
         if (response.body == 'null' || response.body.isEmpty) return null;
         await _cacheApiResponse('current_trip', response.body);
@@ -435,6 +533,10 @@ class ApiService {
         },
       );
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_trip_by_id', response);
+        return null;
+      }
       if (response.statusCode == 200) {
         await _cacheApiResponse('trip_$id', response.body);
         return Trip.fromJson(json.decode(response.body));
@@ -462,6 +564,10 @@ class ApiService {
         },
       );
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('fetch_trips', response);
+        return [];
+      }
       if (response.statusCode == 200) {
         final List<dynamic> data = json.decode(response.body);
         final serverTripMaps = List<Map<String, dynamic>>.from(
@@ -597,6 +703,10 @@ class ApiService {
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('start_trip', response);
+        return null;
+      }
       if (response.statusCode == 201) {
         final trip = Trip.fromJson(json.decode(response.body));
         // Keep local cache fresh so trip survives app restart even before
@@ -1223,6 +1333,10 @@ class ApiService {
       );
       final response = await http.Response.fromStream(streamedResponse);
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('create_doctor_referral', response);
+        return false;
+      }
       if (response.statusCode == 201 || response.statusCode == 200) {
         notifyDataUpdated();
         return true;
@@ -1420,6 +1534,10 @@ class ApiService {
       );
       final response = await http.Response.fromStream(streamedResponse);
 
+      if (_isAuthFailureStatus(response.statusCode)) {
+        await _handleAuthFailure('update_doctor_referral', response);
+        return false;
+      }
       if (response.statusCode == 200) {
         // Also update local cache so the UI refreshes immediately
         try {
