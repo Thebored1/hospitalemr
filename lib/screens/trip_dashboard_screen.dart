@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../models/trip.dart';
@@ -360,16 +360,20 @@ class _TripDashboardScreenState extends State<TripDashboardScreen> {
         (d.visitImage == null || d.visitImage!.trim().isEmpty);
   }
 
+  bool _isDraft(DoctorReferral d) {
+    return d.additionalDetails.contains('<<DRAFT>>');
+  }
+
   void _endTrip() {
-    // Hard block — use _isIncomplete helper
-    final incompleteCount = _trip.doctorReferrals
-        .where((d) => _isIncomplete(d))
+    // Hard block â€” use _isIncomplete helper
+    final needsAttentionCount = _trip.doctorReferrals
+        .where((d) => _isIncomplete(d) || _isDraft(d))
         .length;
-    if (incompleteCount > 0) {
+    if (needsAttentionCount > 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '$incompleteCount doctor visit${incompleteCount > 1 ? 's have' : ' has'} incomplete mandatory fields. Tap the ⚠ entry to complete it.',
+            '$needsAttentionCount doctor visit${needsAttentionCount > 1 ? 's need' : ' needs'} attention. Tap the ⚠ entry to complete it.',
           ),
           backgroundColor: Colors.orange.shade700,
           duration: const Duration(seconds: 4),
