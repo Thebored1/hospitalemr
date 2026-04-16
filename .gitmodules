@@ -1,0 +1,5 @@
+[submodule "backend"]
+	path = backend
+	url = https://github.com/Thebored1/hospitalemr-backend.git
+	branch = main
+
