@@ -48,8 +48,24 @@ app.*.map.json
 *.zip
 *.txt
 *.db
+*.sqlite3
+*.sqlite3-*
+db.sqlite3
 api_service_old.dart
 fix_html.py
 
-# Backend (has its own separate repo)
-/backend/
+# Backend (track source, ignore runtime artifacts)
+/backend/venv/
+/backend/.venv/
+/backend/__pycache__/
+/backend/**/__pycache__/
+/backend/**/*.pyc
+/backend/db.sqlite3
+/backend/*.sqlite3
+/backend/db.sqlite3.bak_*
+/backend/*.sqlite3.bak_*
+/backend/media/
+/backend/staticfiles/
+
+# Local backend exports
+/backend_extracted/
