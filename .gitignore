@@ -44,9 +44,16 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# Large archives and temp files
+# Secrets
+*.env
+.env.*
+
+# Large zip files / Backups
 *.zip
-*.txt
+backend_extracted/
+database_helper.db
+api_service_*.txt
+flutter_build.log
 *.db
 *.sqlite3
 *.sqlite3-*

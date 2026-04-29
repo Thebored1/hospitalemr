@@ -1,0 +1,257 @@
+{% extends 'portal/base.html' %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="mb-3">
+            <a href="{% url 'portal:user_portal_list' %}" class="text-decoration-none">
+                <i class="bi bi-arrow-left"></i> Back to User List
+            </a>
+        </div>
+        
+        <div class="card shadow-sm">
+            <div class="card-header bg-white py-3">
+                <h4 class="mb-0 fw-bold">{{ title }}</h4>
+            </div>
+            <div class="card-body p-4">
+                <form method="post" novalidate id="userForm">
+                    {% csrf_token %}
+                    
+                    {% if form.non_field_errors %}
+                    <div class="alert alert-danger">
+                        {% for error in form.non_field_errors %}
+                            {{ error }}
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">{{ form.username.label }}</label>
+                            {{ form.username }}
+                            {% if form.username.errors %}
+                                <div class="text-danger small">{{ form.username.errors.0 }}</div>
+                            {% endif %}
+                            <div class="form-text small">{{ form.username.help_text }}</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold d-flex justify-content-between align-items-center">
+                                <span>Role</span>
+                                <div class="btn-group">
+                                    <button type="button" class="btn btn-outline-primary btn-sm" id="editRoleBtn" title="Edit Selected Role">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#roleModal" id="addRoleBtn" title="Create New Role">
+                                        <i class="bi bi-plus-lg"></i>
+                                    </button>
+                                </div>
+                            </label>
+                            {{ form.custom_role }}
+                            {% if form.custom_role.errors %}
+                                <div class="text-danger small">{{ form.custom_role.errors.0 }}</div>
+                            {% endif %}
+                            <div class="form-text small">{{ form.custom_role.help_text }}</div>
+                        </div>
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">First Name</label>
+                            {{ form.first_name }}
+                            {% if form.first_name.errors %}
+                                <div class="text-danger small">{{ form.first_name.errors.0 }}</div>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">Last Name</label>
+                            {{ form.last_name }}
+                            {% if form.last_name.errors %}
+                                <div class="text-danger small">{{ form.last_name.errors.0 }}</div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if not is_edit %}
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">Password</label>
+                            {{ form.password1 }}
+                            {% if form.password1.errors %}
+                                <div class="text-danger small">{{ form.password1.errors.0 }}</div>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold">Confirm Password</label>
+                            {{ form.password2 }}
+                            {% if form.password2.errors %}
+                                <div class="text-danger small">{{ form.password2.errors.0 }}</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            {{ form.is_active }}
+                            <label class="form-check-label fw-bold" for="{{ form.is_active.id_for_label }}">Active Status</label>
+                        </div>
+                        <div class="form-text">Inactive users cannot log in to the portal or app.</div>
+                    </div>
+                    {% endif %}
+
+                    <hr class="my-4">
+                    
+                    <div class="d-flex justify-content-between">
+                        <a href="{% url 'portal:user_portal_list' %}" class="btn btn-light px-4">Cancel</a>
+                        <button type="submit" class="btn btn-primary px-5 fw-bold">{{ button_text }}</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Unified Modal for Creating/Editing Role -->
+<div class="modal fade" id="roleModal" tabindex="-1" aria-labelledby="roleModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title fw-bold" id="roleModalLabel">Create New Permission Role</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-4">
+                <input type="hidden" id="editingRoleId" value="">
+                <div class="mb-4">
+                    <label for="roleName" class="form-label fw-bold">Role Name</label>
+                    <input type="text" class="form-control form-control-lg" id="roleName" placeholder="e.g. Operation Lead">
+                </div>
+                <h6 class="fw-bold mt-4 mb-3">Select Allowed Pages</h6>
+                <div class="row g-2" style="max-height: 350px; overflow-y: auto;">
+                    {% for page in pages %}
+                    <div class="col-md-6">
+                        <div class="form-check card p-2 border-light-subtle">
+                            <input class="form-check-input role-page-checkbox ms-1" type="checkbox" value="{{ page.name }}" id="page_{{ page.name }}" checked>
+                            <label class="form-check-label ps-4 small" for="page_{{ page.name }}">
+                                {{ page.title }}
+                            </label>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="modal-footer bg-light">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary px-4 fw-bold" id="saveRoleBtn">Save Role</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const saveRoleBtn = document.getElementById('saveRoleBtn');
+    const customRoleSelect = document.getElementById('id_custom_role');
+    const editRoleBtn = document.getElementById('editRoleBtn');
+    const addRoleBtn = document.getElementById('addRoleBtn');
+    const roleModalElement = document.getElementById('roleModal');
+    const roleModal = new bootstrap.Modal(roleModalElement);
+    const modalTitle = document.getElementById('roleModalLabel');
+    const roleNameInput = document.getElementById('roleName');
+    const editingRoleIdInput = document.getElementById('editingRoleId');
+    const checkboxes = document.querySelectorAll('.role-page-checkbox');
+
+    // Handle Create Click
+    addRoleBtn.addEventListener('click', function() {
+        modalTitle.textContent = "Create New Permission Role";
+        roleNameInput.value = "";
+        editingRoleIdInput.value = "";
+        checkboxes.forEach(cb => cb.checked = true);
+        saveRoleBtn.textContent = "Create & Select Role";
+    });
+
+    // Handle Edit Click
+    editRoleBtn.addEventListener('click', function() {
+        const roleId = customRoleSelect.value;
+        if (!roleId) {
+            alert("Please select a role to edit.");
+            return;
+        }
+
+        modalTitle.textContent = "Edit Permission Role";
+        saveRoleBtn.textContent = "Update Role";
+        editingRoleIdInput.value = roleId;
+        
+        // Fetch role details
+        fetch(`/portal/permissions/role/${roleId}/`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(response => response.json())
+        .then(data => {
+            roleNameInput.value = data.name;
+            checkboxes.forEach(cb => {
+                cb.checked = !data.restricted_pages.includes(cb.value);
+            });
+            roleModal.show();
+        })
+        .catch(err => {
+            console.error(err);
+            alert("Failed to fetch role details.");
+        });
+    });
+
+    saveRoleBtn.addEventListener('click', function() {
+        const name = roleNameInput.value.trim();
+        if (!name) {
+            alert('Please enter a role name.');
+            return;
+        }
+
+        const selectedPages = [];
+        checkboxes.forEach(cb => {
+            if (cb.checked) selectedPages.push(cb.value);
+        });
+
+        const formData = new FormData();
+        formData.append('name', name);
+        formData.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+        selectedPages.forEach(p => formData.append('pages[]', p));
+
+        const roleId = editingRoleIdInput.value;
+        const url = roleId ? `/portal/permissions/role/${roleId}/update/` : "{% url 'portal:create_custom_role' %}";
+
+        saveRoleBtn.disabled = true;
+        saveRoleBtn.textContent = 'Saving...';
+
+        fetch(url, {
+            method: 'POST',
+            body: formData,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                if (roleId) {
+                    // Update existing option text
+                    const option = customRoleSelect.querySelector(`option[value="${roleId}"]`);
+                    if (option) option.textContent = data.role_name;
+                } else {
+                    // Add new option and select it
+                    const option = new Option(data.role_name, data.role_id, true, true);
+                    customRoleSelect.add(option);
+                }
+                roleModal.hide();
+            } else {
+                alert(data.error || 'Failed to save role');
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            alert('An error occurred.');
+        })
+        .finally(() => {
+            saveRoleBtn.disabled = false;
+            saveRoleBtn.textContent = roleId ? 'Update Role' : 'Create & Select Role';
+        });
+    });
+});
+</script>
+{% endblock %}
